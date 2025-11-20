@@ -14,6 +14,7 @@ from app.services.session_manager import SessionManager
 from app.services.question_engine import QuestionEngine
 from app.services.plan_reducer import PlanReducer
 from app.services.plan_synthesizer import PlanSynthesizer
+from app.services.reflection_service import ReflectionService
 from app.api.routes import router, init_routes
 
 # Load environment variables
@@ -34,6 +35,7 @@ session_manager: SessionManager = None
 question_engine: QuestionEngine = None
 plan_reducer: PlanReducer = None
 plan_synthesizer: PlanSynthesizer = None
+reflection_service: ReflectionService = None
 
 
 @asynccontextmanager
@@ -43,7 +45,7 @@ async def lifespan(app: FastAPI):
     Initializes services on startup.
     """
     global vultr_client, model_registry, session_manager
-    global question_engine, plan_reducer, plan_synthesizer
+    global question_engine, plan_reducer, plan_synthesizer, reflection_service
 
     logger.info("Starting InfiniteQ application...")
 
@@ -67,13 +69,16 @@ async def lifespan(app: FastAPI):
         question_engine = QuestionEngine(vultr_client, model_registry)
         plan_reducer = PlanReducer(vultr_client, model_registry)
         plan_synthesizer = PlanSynthesizer(vultr_client, model_registry)
+        reflection_service = ReflectionService(vultr_client, model_registry)
+        logger.info("Reflection service initialized")
 
         # Initialize routes
         init_routes(
             session_manager=session_manager,
             question_engine=question_engine,
             plan_reducer=plan_reducer,
-            plan_synthesizer=plan_synthesizer
+            plan_synthesizer=plan_synthesizer,
+            reflection_service=reflection_service
         )
 
         logger.info("All services initialized successfully")

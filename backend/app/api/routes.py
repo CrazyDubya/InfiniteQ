@@ -23,6 +23,7 @@ from app.services.session_manager import SessionManager
 from app.services.question_engine import QuestionEngine
 from app.services.plan_reducer import PlanReducer
 from app.services.plan_synthesizer import PlanSynthesizer
+from app.services.reflection_service import ReflectionService
 
 logger = logging.getLogger(__name__)
 
@@ -34,20 +35,23 @@ _session_manager: SessionManager = None
 _question_engine: QuestionEngine = None
 _plan_reducer: PlanReducer = None
 _plan_synthesizer: PlanSynthesizer = None
+_reflection_service: ReflectionService = None
 
 
 def init_routes(
     session_manager: SessionManager,
     question_engine: QuestionEngine,
     plan_reducer: PlanReducer,
-    plan_synthesizer: PlanSynthesizer
+    plan_synthesizer: PlanSynthesizer,
+    reflection_service: ReflectionService
 ):
     """Initialize route dependencies."""
-    global _session_manager, _question_engine, _plan_reducer, _plan_synthesizer
+    global _session_manager, _question_engine, _plan_reducer, _plan_synthesizer, _reflection_service
     _session_manager = session_manager
     _question_engine = question_engine
     _plan_reducer = plan_reducer
     _plan_synthesizer = plan_synthesizer
+    _reflection_service = reflection_service
 
 
 @router.post("/session", response_model=CreateSessionResponse)
@@ -412,9 +416,14 @@ async def submit_thread_answers(session_id: str, thread_id: str, request: Thread
 
         # Check if reflection is needed
         reflection_prompt = None
-        if _session_manager.should_inject_reflection(thread):
-            # TODO v0.2: Generate reflection question
-            pass
+        thread_refreshed = _session_manager.get_thread(session_id, thread_id)  # Get updated state
+        if thread_refreshed and _reflection_service.should_inject_reflection(thread_refreshed):
+            # Generate reflection question
+            reflection_prompt = _reflection_service.generate_reflection_question(
+                thread=thread_refreshed,
+                project_context=session.idea_brief.normalized_summary
+            )
+            logger.info(f"Injecting reflection prompt for thread {thread_id}")
 
         # Update global coverage (aggregate across threads)
         # TODO v0.2: Implement proper aggregation
@@ -442,6 +451,100 @@ async def submit_thread_answers(session_id: str, thread_id: str, request: Thread
         raise
     except Exception as e:
         logger.error(f"Thread answer submission failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/session/{session_id}/threads/{thread_id}/reflect")
+async def submit_reflection(session_id: str, thread_id: str, reflection: dict):
+    """
+    Submit a reflection for a thread (v0.2).
+
+    Args:
+        session_id: Session identifier
+        thread_id: Thread identifier
+        reflection: Dict with "text" field containing reflection
+
+    Returns:
+        Created PlanNote
+    """
+    try:
+        # Get session and thread
+        session = _session_manager.get_session(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        thread = _session_manager.get_thread(session_id, thread_id)
+        if not thread:
+            raise HTTPException(status_code=404, detail="Thread not found")
+
+        reflection_text = reflection.get("text", "").strip()
+        if not reflection_text:
+            raise HTTPException(status_code=400, detail="Reflection text required")
+
+        # Create plan note
+        plan_note = _reflection_service.create_plan_note(
+            thread_id=thread_id,
+            index_in_thread=thread.questions_asked,
+            raw_reflection=reflection_text,
+            thread_type=thread.type,
+            project_profile=session.project_profile.model_dump()
+        )
+
+        # Add note to session
+        _session_manager.add_plan_note(
+            session_id=session_id,
+            thread_id=thread_id,
+            raw=plan_note.raw,
+            distilled=plan_note.distilled,
+            tags=plan_note.tags
+        )
+
+        logger.info(f"Reflection captured for thread {thread_id}: {len(plan_note.tags)} tags")
+
+        return {
+            "note": plan_note.model_dump(),
+            "message": "Reflection captured successfully"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Reflection submission failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/session/{session_id}/threads/{thread_id}/insights")
+async def get_thread_insights(session_id: str, thread_id: str):
+    """
+    Get insights extracted from thread reflections.
+
+    Args:
+        session_id: Session identifier
+        thread_id: Thread identifier
+
+    Returns:
+        Summary of insights from reflections
+    """
+    try:
+        thread = _session_manager.get_thread(session_id, thread_id)
+        if not thread:
+            raise HTTPException(status_code=404, detail="Thread not found")
+
+        insights_summary = _reflection_service.extract_insights_from_notes(
+            notes=thread.notes
+        )
+
+        return {
+            "thread_id": thread_id,
+            "note_count": len(thread.notes),
+            "insights": insights_summary,
+            "notes": [note.model_dump() for note in thread.notes]
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Insights retrieval failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
