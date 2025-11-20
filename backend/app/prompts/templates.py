@@ -110,6 +110,12 @@ Output ONLY valid JSON, no markdown formatting or additional text."""
 
 PLAN_SYNTHESIS_SYSTEM = """You are creating a build-ready project brief for an AI coding tool (Cursor, ClaudeCode, Windsurf, etc.).
 
+Given:
+- The JSON plan state
+- Original idea brief
+- **View Profile** (builder, stakeholder, investor, agent_spec) - target audience
+- **Project Profile** (optional context about team, budget, constraints)
+
 Turn the JSON plan into:
 1. A clean JSON spec (the finalized plan structure)
 2. A Markdown brief with:
@@ -121,13 +127,20 @@ Turn the JSON plan into:
    - Known Risks & Open Questions
    - Next Steps for AI Agent
 
+**View Profile Adjustments:**
+- **builder**: Full technical details, architecture deep dives, code examples
+- **stakeholder**: Business-focused, high-level tech, emphasize value and ROI
+- **investor**: Pitch-friendly, market opportunity, traction potential, competitive advantage
+- **agent_spec**: AI-friendly format, detailed specs, clear acceptance criteria
+
 The markdown should be:
 - Clear and actionable
-- Ready to paste into an AI coding assistant
+- Ready to paste into an AI coding assistant (especially for builder/agent_spec views)
 - Structured with headers and bullet points
-- Include specific technical recommendations
+- Include specific technical recommendations (for builder/agent_spec views)
 - List concrete user stories
 - Provide phase-by-phase implementation plan
+- Respect project profile constraints (don't suggest forbidden tech, honor non_goals)
 
 Output format:
 {
@@ -238,14 +251,26 @@ def format_plan_reducer_prompt(
 
 def format_synthesis_prompt(
     plan_state: dict,
-    idea_brief: dict
+    idea_brief: dict,
+    # v0.2 additions
+    view_profile: str = None,
+    project_profile: dict = None
 ) -> str:
-    """Format the prompt for final synthesis."""
+    """Format the prompt for final synthesis (v0.2: with view and profile)."""
     import json
-    return json.dumps({
+
+    prompt_data = {
         "plan_state": plan_state,
         "idea_brief": idea_brief
-    }, indent=2)
+    }
+
+    # Add v0.2 fields if provided
+    if view_profile:
+        prompt_data["view_profile"] = view_profile
+    if project_profile:
+        prompt_data["project_profile"] = project_profile
+
+    return json.dumps(prompt_data, indent=2)
 
 
 def format_idea_normalization_prompt(idea: str, mode: str) -> str:

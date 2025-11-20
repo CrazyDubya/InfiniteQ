@@ -1,9 +1,23 @@
 """
 Plan Synthesizer: creates final build-ready output.
+Version 0.2: Adds view profiles and execution bundle generation.
 """
 import logging
-from typing import Tuple
-from app.models.schema import PlanState, IdeaBrief
+from typing import Tuple, Optional, List
+from app.models.schema import (
+    PlanState,
+    IdeaBrief,
+    # v0.2 additions
+    ViewProfile,
+    ExecutionBundle,
+    RepoScaffold,
+    Task,
+    LLMPromptTemplate,
+    Phase,
+    ProjectProfile,
+    PlanChunk,
+    Visibility
+)
 from app.services.vultr_client import VultrClient
 from app.services.model_registry import ModelRegistry
 from app.prompts.templates import (
@@ -35,17 +49,24 @@ class PlanSynthesizer:
     def synthesize(
         self,
         plan_state: PlanState,
-        idea_brief: IdeaBrief
-    ) -> Tuple[PlanState, str]:
+        idea_brief: IdeaBrief,
+        # v0.2 additions
+        view_profile: ViewProfile = ViewProfile.BUILDER,
+        project_profile: Optional[ProjectProfile] = None,
+        include_execution_bundle: bool = False
+    ) -> Tuple[PlanState, str, Optional[ExecutionBundle]]:
         """
-        Generate final plan artifacts.
+        Generate final plan artifacts (v0.2: with views and execution bundles).
 
         Args:
             plan_state: Current plan state
             idea_brief: Original idea brief
+            view_profile: Target audience for the plan
+            project_profile: Project profile for context
+            include_execution_bundle: Whether to generate execution bundle
 
         Returns:
-            Tuple of (final_json_plan, markdown_brief)
+            Tuple of (final_json_plan, markdown_brief, execution_bundle)
         """
         try:
             # Use best synthesis model
@@ -58,11 +79,14 @@ class PlanSynthesizer:
             if not model:
                 raise ValueError("No synthesis models available")
 
-            logger.info(f"Synthesizing with model: {model}")
+            logger.info(f"Synthesizing with model: {model} (view: {view_profile.value})")
 
             user_prompt = format_synthesis_prompt(
                 plan_state=plan_state.model_dump(),
-                idea_brief=idea_brief.model_dump()
+                idea_brief=idea_brief.model_dump(),
+                # v0.2 additions
+                view_profile=view_profile.value,
+                project_profile=project_profile.model_dump() if project_profile else None
             )
 
             messages = [
@@ -91,13 +115,21 @@ class PlanSynthesizer:
                 # Generate fallback markdown
                 markdown_brief = self._generate_fallback_markdown(final_plan, idea_brief)
 
+            # v0.2: Generate execution bundle if requested
+            execution_bundle = None
+            if include_execution_bundle:
+                execution_bundle = self._generate_execution_bundle(
+                    plan_state=final_plan,
+                    project_profile=project_profile or ProjectProfile()
+                )
+
             logger.info("Synthesis completed successfully")
-            return final_plan, markdown_brief
+            return final_plan, markdown_brief, execution_bundle
 
         except Exception as e:
             logger.error(f"Synthesis failed: {e}", exc_info=True)
             # Return best-effort output
-            return plan_state, self._generate_fallback_markdown(plan_state, idea_brief)
+            return plan_state, self._generate_fallback_markdown(plan_state, idea_brief), None
 
     def _generate_fallback_markdown(
         self,
@@ -226,3 +258,280 @@ class PlanSynthesizer:
         sections.append("5. Deploy and iterate based on feedback")
 
         return "\n".join(sections)
+
+    def _generate_execution_bundle(
+        self,
+        plan_state: PlanState,
+        project_profile: ProjectProfile
+    ) -> ExecutionBundle:
+        """
+        Generate execution bundle with repo scaffold, tasks, and prompts (v0.2).
+
+        Args:
+            plan_state: Final plan state
+            project_profile: Project profile
+
+        Returns:
+            Execution bundle
+        """
+        # Generate repo scaffold
+        repo_scaffold = self._generate_repo_scaffold(plan_state, project_profile)
+
+        # Generate task breakdown
+        tasks = self._generate_tasks(plan_state, project_profile)
+
+        # Generate LLM prompts
+        prompts = self._generate_llm_prompts(plan_state, repo_scaffold, project_profile)
+
+        return ExecutionBundle(
+            repo_scaffold=repo_scaffold,
+            tasks=tasks,
+            prompts=prompts
+        )
+
+    def _generate_repo_scaffold(
+        self,
+        plan_state: PlanState,
+        project_profile: ProjectProfile
+    ) -> RepoScaffold:
+        """
+        Generate repository structure scaffold.
+
+        Args:
+            plan_state: Plan state
+            project_profile: Project profile
+
+        Returns:
+            Repo scaffold
+        """
+        # Infer language and frameworks from architecture and constraints
+        arch = plan_state.architecture
+        language = "ts"  # Default
+
+        # Detect language from tech stack
+        tech_stack = f"{arch.frontend} {arch.backend} {arch.data}".lower()
+        if "python" in tech_stack or "fastapi" in tech_stack or "django" in tech_stack:
+            language = "py"
+        elif "go" in tech_stack or "golang" in tech_stack:
+            language = "go"
+        elif "rust" in tech_stack:
+            language = "rust"
+
+        # Extract frameworks
+        frameworks = []
+        if "react" in tech_stack:
+            frameworks.append("react")
+        if "fastapi" in tech_stack:
+            frameworks.append("fastapi")
+        if "django" in tech_stack:
+            frameworks.append("django")
+        if "prisma" in tech_stack:
+            frameworks.append("prisma")
+        if "postgres" in tech_stack:
+            frameworks.append("postgres")
+
+        # Build structure
+        structure = {}
+        if language == "py":
+            structure = {
+                "backend/": ["app.py", "models/", "services/", "tests/"],
+                "": ["requirements.txt", "README.md", ".gitignore"]
+            }
+            if "react" in frameworks:
+                structure["frontend/"] = ["src/", "public/", "package.json"]
+        elif language == "ts":
+            structure = {
+                "src/": ["index.ts", "types/", "services/", "tests/"],
+                "": ["package.json", "tsconfig.json", "README.md", ".gitignore"]
+            }
+        else:
+            # Generic structure
+            structure = {
+                "src/": ["main", "tests/"],
+                "": ["README.md", ".gitignore"]
+            }
+
+        return RepoScaffold(
+            language=language,
+            frameworks=frameworks,
+            structure=structure
+        )
+
+    def _generate_tasks(
+        self,
+        plan_state: PlanState,
+        project_profile: ProjectProfile
+    ) -> List[Task]:
+        """
+        Generate task breakdown by phase.
+
+        Args:
+            plan_state: Plan state
+            project_profile: Project profile
+
+        Returns:
+            List of tasks
+        """
+        tasks = []
+
+        # Task 1: Setup
+        tasks.append(Task(
+            id="TASK_001",
+            title="Set up project structure and dependencies",
+            phase=Phase.PROTOTYPE,
+            description=f"Initialize {plan_state.architecture.frontend or 'frontend'} and {plan_state.architecture.backend or 'backend'} with necessary dependencies.",
+            acceptance_criteria=[
+                "Project structure matches scaffold",
+                "All dependencies installed",
+                "Basic health check endpoint works"
+            ],
+            estimate="S",
+            dependencies=[]
+        ))
+
+        # Task 2: Core features
+        core_features = [f for f in plan_state.features if f.must_have]
+        for i, feature in enumerate(core_features[:5], 2):  # Limit to 5 features
+            phase = Phase.PROTOTYPE if i <= 3 else Phase.V1
+            tasks.append(Task(
+                id=f"TASK_{i:03d}",
+                title=f"Implement {feature.title}",
+                phase=phase,
+                description=feature.notes or f"Build {feature.title} functionality",
+                acceptance_criteria=[
+                    f"{feature.title} works as expected",
+                    "Unit tests pass",
+                    "Integration with other components verified"
+                ],
+                estimate="M",
+                dependencies=["TASK_001"]
+            ))
+
+        # Task: Testing
+        tasks.append(Task(
+            id=f"TASK_{len(tasks)+1:03d}",
+            title="Add comprehensive tests",
+            phase=Phase.V1,
+            description="Write unit and integration tests for core functionality",
+            acceptance_criteria=[
+                "Test coverage > 70%",
+                "All critical paths tested",
+                "CI/CD pipeline passing"
+            ],
+            estimate="M",
+            dependencies=[t.id for t in tasks if t.phase == Phase.PROTOTYPE]
+        ))
+
+        return tasks
+
+    def _generate_llm_prompts(
+        self,
+        plan_state: PlanState,
+        repo_scaffold: RepoScaffold,
+        project_profile: ProjectProfile
+    ) -> List[LLMPromptTemplate]:
+        """
+        Generate ready-to-use prompts for AI coding tools.
+
+        Args:
+            plan_state: Plan state
+            repo_scaffold: Repo scaffold
+            project_profile: Project profile
+
+        Returns:
+            List of prompt templates
+        """
+        prompts = []
+
+        # Prompt 1: Initial setup for ClaudeCode
+        frameworks_str = ", ".join(repo_scaffold.frameworks) if repo_scaffold.frameworks else "the specified stack"
+        prompts.append(LLMPromptTemplate(
+            id="PROMPT_001",
+            title="Initial project setup",
+            target="claudecode",
+            prompt=f"""Please set up a new project with the following requirements:
+
+**Project:** {plan_state.meta.title}
+
+**Problem:** {plan_state.problem.summary}
+
+**Tech Stack:**
+- Frontend: {plan_state.architecture.frontend or 'TBD'}
+- Backend: {plan_state.architecture.backend or 'TBD'}
+- Database: {plan_state.architecture.data or 'TBD'}
+- Frameworks: {frameworks_str}
+
+**Repository Structure:**
+{self._format_structure(repo_scaffold.structure)}
+
+**Constraints:**
+- Timeline: {project_profile.timeline}
+- Team size: {project_profile.team_size}
+- Budget: {project_profile.budget_band}
+
+Please:
+1. Initialize the project with the structure above
+2. Set up all necessary configuration files
+3. Install dependencies
+4. Create a basic health check endpoint
+5. Add a comprehensive README
+
+Let me know when you're done and I'll provide the next steps."""
+        ))
+
+        # Prompt 2: Feature implementation for Cursor
+        must_have_features = [f for f in plan_state.features if f.must_have]
+        if must_have_features:
+            features_list = "\n".join([f"- {f.title}: {f.notes or 'Core functionality'}" for f in must_have_features[:5]])
+            prompts.append(LLMPromptTemplate(
+                id="PROMPT_002",
+                title="Implement core features",
+                target="cursor",
+                prompt=f"""Implement the following core features for {plan_state.meta.title}:
+
+{features_list}
+
+**Architecture Context:**
+- Frontend: {plan_state.architecture.frontend}
+- Backend: {plan_state.architecture.backend}
+- Database: {plan_state.architecture.data}
+
+**User Context:**
+{self._format_users(plan_state.users)}
+
+For each feature:
+1. Implement the backend API endpoints
+2. Create the frontend UI components
+3. Add data models/schemas
+4. Write basic unit tests
+5. Update documentation
+
+Focus on clean, maintainable code that follows best practices."""
+            ))
+
+        return prompts
+
+    def _format_structure(self, structure: dict) -> str:
+        """Format structure dict as readable tree."""
+        lines = []
+        for dir_path, items in structure.items():
+            if dir_path:
+                lines.append(f"{dir_path}")
+                for item in items:
+                    lines.append(f"  - {item}")
+            else:
+                for item in items:
+                    lines.append(f"- {item}")
+        return "\n".join(lines)
+
+    def _format_users(self, users: list) -> str:
+        """Format users as readable text."""
+        if not users:
+            return "No user personas defined"
+
+        lines = []
+        for user in users:
+            lines.append(f"**{user.role}:**")
+            if user.needs:
+                lines.append("  Needs: " + ", ".join(user.needs))
+        return "\n".join(lines)

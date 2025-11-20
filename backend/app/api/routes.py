@@ -54,6 +54,41 @@ def init_routes(
     _reflection_service = reflection_service
 
 
+def _filter_plan_chunks_by_view(chunks: list, view_profile) -> list:
+    """
+    Filter plan chunks by view profile visibility (v0.2).
+
+    Args:
+        chunks: List of PlanChunk objects
+        view_profile: ViewProfile enum
+
+    Returns:
+        Filtered list of chunks
+    """
+    from app.models.schema import ViewProfile, Visibility
+
+    if not chunks:
+        return []
+
+    # Define visibility mapping for each view
+    visibility_map = {
+        ViewProfile.BUILDER: {Visibility.INTERNAL_ONLY, Visibility.TEAM, Visibility.AGENT_ONLY},
+        ViewProfile.STAKEHOLDER: {Visibility.TEAM, Visibility.STAKEHOLDER, Visibility.DECK_FRIENDLY},
+        ViewProfile.INVESTOR: {Visibility.STAKEHOLDER, Visibility.DECK_FRIENDLY},
+        ViewProfile.AGENT_SPEC: {Visibility.AGENT_ONLY, Visibility.TEAM}
+    }
+
+    allowed_visibilities = visibility_map.get(view_profile, {Visibility.TEAM})
+
+    # Filter chunks
+    filtered = [
+        chunk for chunk in chunks
+        if not chunk.parked and chunk.visibility in allowed_visibilities
+    ]
+
+    return filtered
+
+
 @router.post("/session", response_model=CreateSessionResponse)
 async def create_session(request: CreateSessionRequest):
     """
@@ -208,20 +243,17 @@ async def finish_session(session_id: str, request: FinishRequest):
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
 
-        # Synthesize final plan with view profile
-        final_plan, markdown_brief = _plan_synthesizer.synthesize(
+        # Synthesize final plan with view profile and execution bundle
+        final_plan, markdown_brief, execution_bundle = _plan_synthesizer.synthesize(
             plan_state=session.plan_state,
-            idea_brief=session.idea_brief
+            idea_brief=session.idea_brief,
+            view_profile=request.view_profile,
+            project_profile=session.project_profile,
+            include_execution_bundle=request.include_execution_bundle
         )
 
-        # TODO v0.2: Generate execution bundle if requested
-        execution_bundle = None
-        if request.include_execution_bundle:
-            # Will implement in PlanSynthesizer v0.2
-            pass
-
-        # TODO v0.2: Filter plan chunks by view profile
-        plan_chunks = session.plan_chunks
+        # v0.2: Filter plan chunks by view profile
+        plan_chunks = _filter_plan_chunks_by_view(session.plan_chunks, request.view_profile)
 
         # Mark session as completed
         _session_manager.complete_session(session_id)
