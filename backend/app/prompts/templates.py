@@ -89,6 +89,9 @@ PLAN_REDUCER_SYSTEM = """You maintain a canonical JSON plan.
 Given:
 - The existing plan JSON
 - New questions and their answers
+- **Plan Notes** from user reflections (constraints, risks, preferences, decisions, insights)
+- **Project Profile** (optional context about project type, team, budget, constraints)
+- **Thread ID** (optional context about which thread these answers came from)
 
 Update ONLY the relevant parts of the plan. Rules:
 1. Preserve the existing structure and all keys
@@ -97,6 +100,9 @@ Update ONLY the relevant parts of the plan. Rules:
 4. If answers contradict earlier data, prefer the new information
 5. Keep the plan concise but complete
 6. Maintain all list structures (don't lose existing items)
+7. **Incorporate plan notes**: Add constraints from notes to constraints section, risks to risks section, etc.
+8. **Respect project profile**: Don't add tech that violates tech_constraints or items in non_goals
+9. **Thread-aware**: Consider which thread generated these answers when organizing plan sections
 
 Output the COMPLETE updated plan_state as JSON.
 Output ONLY valid JSON, no markdown formatting or additional text."""
@@ -205,14 +211,29 @@ def format_aggregation_prompt(
 
 def format_plan_reducer_prompt(
     plan_state: dict,
-    new_qa: list
+    new_qa: list,
+    # v0.2 additions
+    thread_id: str = None,
+    notes_context: dict = None,
+    project_profile: dict = None
 ) -> str:
-    """Format the prompt for plan reduction."""
+    """Format the prompt for plan reduction (v0.2: with notes and profile context)."""
     import json
-    return json.dumps({
+
+    prompt_data = {
         "plan_state": plan_state,
         "new_qa": new_qa
-    }, indent=2)
+    }
+
+    # Add v0.2 fields if provided
+    if thread_id:
+        prompt_data["thread_id"] = thread_id
+    if notes_context:
+        prompt_data["notes_context"] = notes_context
+    if project_profile:
+        prompt_data["project_profile"] = project_profile
+
+    return json.dumps(prompt_data, indent=2)
 
 
 def format_synthesis_prompt(

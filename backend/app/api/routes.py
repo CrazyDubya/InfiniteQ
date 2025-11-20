@@ -140,10 +140,12 @@ async def submit_answers(session_id: str, request: AnswerRequest):
         questions = []  # Would be retrieved from session state
 
         # Update plan state
+        # v0.2: Pass profile if available (backwards compatible)
         updated_plan = _plan_reducer.update_plan(
             plan_state=session.plan_state,
             questions=questions,
-            answers=request.answers
+            answers=request.answers,
+            project_profile=session.project_profile
         )
 
         # Update coverage
@@ -411,14 +413,19 @@ async def submit_thread_answers(session_id: str, thread_id: str, request: Thread
         updated_plan = _plan_reducer.update_plan(
             plan_state=session.plan_state,
             questions=questions,
-            answers=request.answers
+            answers=request.answers,
+            # v0.2: Pass thread context and notes
+            thread_id=thread_id,
+            plan_notes=thread.notes,
+            project_profile=session.project_profile
         )
 
-        # Update thread coverage
+        # Update thread coverage (with phase support)
         updated_thread_coverage = _plan_reducer.update_coverage(
             coverage=thread.coverage,
             questions=questions,
-            answers=request.answers
+            answers=request.answers,
+            phase_coverage=thread.phase_coverage  # v0.2: Update phase coverage in-place
         )
 
         # Update thread with answers
