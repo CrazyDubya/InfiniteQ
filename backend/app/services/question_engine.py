@@ -1,11 +1,24 @@
 """
 Question Engine: generates next questions using multiple models.
+Version 0.2: Adds support for profiles, threads, phases, and plan notes.
 """
 import logging
 import asyncio
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from app.models.schema import Question, CoverageMap, IdeaBrief, PlanState, QAPair
+from app.models.schema import (
+    Question,
+    CoverageMap,
+    IdeaBrief,
+    PlanState,
+    QAPair,
+    # v0.2 additions
+    ProjectProfile,
+    PersonaProfile,
+    ThreadType,
+    PlanNote,
+    PhaseCoverageMap
+)
 from app.services.vultr_client import VultrClient
 from app.services.model_registry import ModelRegistry
 from app.prompts.templates import (
@@ -44,22 +57,39 @@ class QuestionEngine:
         plan_state: PlanState,
         coverage: CoverageMap,
         recent_qa: List[QAPair],
-        round_number: int = 0
+        round_number: int = 0,
+        # v0.2 additions
+        project_profile: Optional[ProjectProfile] = None,
+        persona_profile: Optional[PersonaProfile] = None,
+        thread_type: Optional[ThreadType] = None,
+        plan_notes: Optional[List[PlanNote]] = None,
+        phase_coverage: Optional[PhaseCoverageMap] = None
     ) -> List[Question]:
         """
-        Generate next questions using multi-model approach.
+        Generate next questions using multi-model approach (v0.2: profile-aware).
 
         Args:
             idea_brief: Normalized idea
             plan_state: Current plan state
-            coverage: Current coverage scores
+            coverage: Current coverage scores (thread-specific or global)
             recent_qa: Recent Q&A history
             round_number: Which round this is (affects model selection)
+            project_profile: Project profile for contextualizing questions
+            persona_profile: Persona profile for adjusting question style
+            thread_type: Type of thread (for thread-specific questions)
+            plan_notes: Recent reflections for context
+            phase_coverage: Coverage by phase (for targeting weak phases)
 
         Returns:
             List of 2-4 questions to ask next
         """
         try:
+            # Use defaults for backwards compatibility
+            if project_profile is None:
+                project_profile = ProjectProfile()
+            if persona_profile is None:
+                persona_profile = PersonaProfile()
+
             # Select models based on round number
             models = self._select_models_for_round(round_number)
             logger.info(f"Round {round_number}: Using models {models}")
@@ -70,7 +100,12 @@ class QuestionEngine:
                 idea_brief=idea_brief,
                 plan_state=plan_state,
                 coverage=coverage,
-                recent_qa=recent_qa
+                recent_qa=recent_qa,
+                project_profile=project_profile,
+                persona_profile=persona_profile,
+                thread_type=thread_type,
+                plan_notes=plan_notes or [],
+                phase_coverage=phase_coverage
             )
 
             if not candidates:
@@ -128,10 +163,15 @@ class QuestionEngine:
         idea_brief: IdeaBrief,
         plan_state: PlanState,
         coverage: CoverageMap,
-        recent_qa: List[QAPair]
+        recent_qa: List[QAPair],
+        project_profile: ProjectProfile,
+        persona_profile: PersonaProfile,
+        thread_type: Optional[ThreadType],
+        plan_notes: List[PlanNote],
+        phase_coverage: Optional[PhaseCoverageMap]
     ) -> List[Dict[str, Any]]:
         """
-        Call multiple models in parallel to generate question candidates.
+        Call multiple models in parallel to generate question candidates (v0.2: profile-aware).
 
         Args:
             models: List of model IDs
@@ -139,11 +179,16 @@ class QuestionEngine:
             plan_state: Plan state
             coverage: Coverage map
             recent_qa: Recent Q&A
+            project_profile: Project profile
+            persona_profile: Persona profile
+            thread_type: Thread type
+            plan_notes: Plan notes from reflections
+            phase_coverage: Coverage by phase
 
         Returns:
             List of candidate sets from each model
         """
-        # Prepare prompt
+        # Prepare v0.2 prompt with profiles
         user_prompt = format_question_generation_prompt(
             idea_brief=idea_brief.model_dump(),
             plan_state=plan_state.model_dump(),
@@ -152,7 +197,16 @@ class QuestionEngine:
                 "q": qa.question.text,
                 "a": f"{qa.answer.choice_id}: {qa.answer.free_text or ''}"
             } for qa in recent_qa],
-            max_questions=3
+            max_questions=3,
+            # v0.2 additions
+            project_profile=project_profile.model_dump(),
+            persona_profile=persona_profile.model_dump(),
+            thread_type=thread_type.value if thread_type else None,
+            plan_notes=[{
+                "distilled": note.distilled,
+                "tags": note.tags
+            } for note in plan_notes[-5:]],  # Last 5 notes
+            phase_coverage=phase_coverage.model_dump() if phase_coverage else None
         )
 
         messages = [

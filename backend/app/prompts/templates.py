@@ -10,6 +10,11 @@ The plan is maintained as a JSON state. You will be given:
 - The current JSON plan state
 - Coverage scores showing which areas are still weak
 - The last few questions and answers
+- **Project Profile**: type, team size, budget, timeline, tech constraints, and non-goals
+- **Persona Profile**: user's role, comfort with tech/business, and preferred depth
+- **Thread Type**: which aspect of planning this thread focuses on (architecture, UX, risks, etc.)
+- **Plan Notes**: recent reflections with semantic tags (constraints, risks, preferences, decisions, insights)
+- **Phase Coverage**: coverage across lifecycle phases (prototype, v1, scale_up, v2_plus)
 
 Your output must be compact JSON with 2-4 questions, each with 3-5 options, like:
 
@@ -31,13 +36,24 @@ Your output must be compact JSON with 2-4 questions, each with 3-5 options, like
 }
 
 Rules:
-1. Focus on the LOWEST coverage areas first
+1. Focus on the LOWEST coverage areas first (both overall coverage and phase_coverage)
 2. Questions should be actionable and specific
 3. Options should be mutually exclusive where possible
 4. Always include an "OTHER" option for user flexibility
 5. Use clear, non-technical language unless asking about tech details
 6. Priority should reflect how critical this question is (0.0-1.0)
 7. The "effect" field should be a short semantic tag
+8. **Respect project_profile.tech_constraints**: Do NOT propose questions about forbidden tech
+9. **Respect project_profile.non_goals**: Do NOT ask about explicitly out-of-scope items
+10. **Adjust for persona_profile**:
+    - For low tech comfort: use plain language, avoid jargon
+    - For high tech comfort: can use technical terminology
+    - For "light" depth: keep questions high-level
+    - For "deep" depth: ask detailed technical questions
+11. **Consider thread_type**: Tailor questions to the thread's focus area
+12. **Incorporate plan_notes**: Use tags to avoid redundant questions and address gaps
+13. **Target weak phases**: If phase_coverage shows gaps in a specific phase, include phase-targeted questions
+14. **Phase field**: Optionally set "phase" on questions (prototype, v1, scale_up, v2_plus) to target specific lifecycle stages
 
 Output ONLY valid JSON, no markdown formatting or additional text."""
 
@@ -141,17 +157,38 @@ def format_question_generation_prompt(
     plan_state: dict,
     coverage: dict,
     recent_qa: list,
-    max_questions: int = 3
+    max_questions: int = 3,
+    # v0.2 additions
+    project_profile: dict = None,
+    persona_profile: dict = None,
+    thread_type: str = None,
+    plan_notes: list = None,
+    phase_coverage: dict = None
 ) -> str:
-    """Format the user prompt for question generation."""
+    """Format the user prompt for question generation (v0.2: with profiles)."""
     import json
-    return json.dumps({
+
+    prompt_data = {
         "idea_brief": idea_brief,
         "plan_state": plan_state,
         "coverage": coverage,
         "recent_qa": recent_qa[-5:],  # Last 5 Q&As
         "max_questions": max_questions
-    }, indent=2)
+    }
+
+    # Add v0.2 fields if provided
+    if project_profile:
+        prompt_data["project_profile"] = project_profile
+    if persona_profile:
+        prompt_data["persona_profile"] = persona_profile
+    if thread_type:
+        prompt_data["thread_type"] = thread_type
+    if plan_notes:
+        prompt_data["plan_notes"] = plan_notes
+    if phase_coverage:
+        prompt_data["phase_coverage"] = phase_coverage
+
+    return json.dumps(prompt_data, indent=2)
 
 
 def format_aggregation_prompt(

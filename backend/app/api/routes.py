@@ -86,7 +86,13 @@ async def create_session(request: CreateSessionRequest):
             plan_state=session.plan_state,
             coverage=initial_thread.coverage,
             recent_qa=[],
-            round_number=0
+            round_number=0,
+            # v0.2: Pass profiles and thread context
+            project_profile=session.project_profile,
+            persona_profile=session.persona_profile,
+            thread_type=initial_thread.type,
+            plan_notes=initial_thread.notes,
+            phase_coverage=initial_thread.phase_coverage
         )
 
         return CreateSessionResponse(
@@ -158,12 +164,15 @@ async def submit_answers(session_id: str, request: AnswerRequest):
 
         # Generate next questions
         round_number = len(session.qa_history) // 3  # Rough round estimation
+        # v0.2: Pass profiles if available (backwards compatible)
         next_questions = _question_engine.generate_questions(
             idea_brief=session.idea_brief,
             plan_state=updated_plan,
             coverage=updated_coverage,
             recent_qa=session.qa_history[-5:],
-            round_number=round_number
+            round_number=round_number,
+            project_profile=session.project_profile,
+            persona_profile=session.persona_profile
         )
 
         return AnswerResponse(
@@ -264,7 +273,13 @@ async def create_thread(session_id: str, request: CreateThreadRequest):
             plan_state=session.plan_state,
             coverage=thread.coverage,
             recent_qa=[],
-            round_number=0
+            round_number=0,
+            # v0.2: Pass profiles and thread context
+            project_profile=session.project_profile,
+            persona_profile=session.persona_profile,
+            thread_type=thread.type,
+            plan_notes=thread.notes,
+            phase_coverage=thread.phase_coverage
         )
 
         return CreateThreadResponse(
@@ -436,7 +451,13 @@ async def submit_thread_answers(session_id: str, thread_id: str, request: Thread
             plan_state=updated_plan,
             coverage=updated_thread_coverage,
             recent_qa=thread.qa_history[-5:],
-            round_number=round_number
+            round_number=round_number,
+            # v0.2: Full context with profiles, thread, notes, and phases
+            project_profile=session.project_profile,
+            persona_profile=session.persona_profile,
+            thread_type=thread_refreshed.type if thread_refreshed else thread.type,
+            plan_notes=thread_refreshed.notes if thread_refreshed else thread.notes,
+            phase_coverage=thread_refreshed.phase_coverage if thread_refreshed else thread.phase_coverage
         )
 
         return ThreadAnswerResponse(
