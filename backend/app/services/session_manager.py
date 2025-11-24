@@ -462,6 +462,88 @@ class SessionManager:
         logger.info(f"Completed session {session_id}")
         return session
 
+    def store_pending_questions(
+        self,
+        session_id: str,
+        thread_id: Optional[str],
+        questions: List
+    ) -> None:
+        """
+        Store pending questions for later retrieval when answers are submitted.
+
+        Args:
+            session_id: Session identifier
+            thread_id: Thread identifier (None for legacy session-level storage)
+            questions: List of Question objects to store
+        """
+        session = self.get_session(session_id)
+        if not session:
+            raise ValueError(f"Session {session_id} not found")
+
+        if thread_id:
+            thread = self.get_thread(session_id, thread_id)
+            if not thread:
+                raise ValueError(f"Thread {thread_id} not found")
+            thread.pending_questions = questions
+            thread.last_updated = datetime.utcnow().isoformat()
+            logger.debug(f"Stored {len(questions)} pending questions for thread {thread_id}")
+        else:
+            # Legacy session-level storage
+            session.pending_questions = questions
+            session.updated_at = datetime.utcnow().isoformat()
+            logger.debug(f"Stored {len(questions)} pending questions for session {session_id}")
+
+    def get_pending_questions(
+        self,
+        session_id: str,
+        thread_id: Optional[str] = None
+    ) -> List:
+        """
+        Retrieve pending questions for a session or thread.
+
+        Args:
+            session_id: Session identifier
+            thread_id: Thread identifier (None for legacy session-level storage)
+
+        Returns:
+            List of pending Question objects
+        """
+        session = self.get_session(session_id)
+        if not session:
+            raise ValueError(f"Session {session_id} not found")
+
+        if thread_id:
+            thread = self.get_thread(session_id, thread_id)
+            if not thread:
+                raise ValueError(f"Thread {thread_id} not found")
+            return thread.pending_questions
+        else:
+            # Legacy session-level storage
+            return session.pending_questions
+
+    def clear_pending_questions(
+        self,
+        session_id: str,
+        thread_id: Optional[str] = None
+    ) -> None:
+        """
+        Clear pending questions after they've been answered.
+
+        Args:
+            session_id: Session identifier
+            thread_id: Thread identifier (None for legacy session-level storage)
+        """
+        session = self.get_session(session_id)
+        if not session:
+            return
+
+        if thread_id:
+            thread = self.get_thread(session_id, thread_id)
+            if thread:
+                thread.pending_questions = []
+        else:
+            session.pending_questions = []
+
     def _normalize_idea(self, idea: str, mode: str) -> IdeaBrief:
         """
         Normalize user's raw idea into structured brief.

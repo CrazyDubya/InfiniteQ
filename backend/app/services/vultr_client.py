@@ -4,6 +4,7 @@ Wraps the OpenAI-compatible API at https://api.vultrinference.com/v1
 """
 import os
 import json
+import copy
 import logging
 from typing import List, Dict, Any, Optional
 import requests
@@ -149,6 +150,9 @@ class VultrClient:
         Returns:
             Parsed JSON object
         """
+        # Deep copy messages to avoid mutating the caller's list
+        messages = copy.deepcopy(messages)
+
         # Add JSON format instruction to system message if not present
         if messages and messages[0]["role"] == "system":
             if "JSON" not in messages[0]["content"]:

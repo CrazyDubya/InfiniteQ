@@ -179,6 +179,7 @@ class ThreadState(BaseModel):
     questions_since_reflection: int = 0
     qa_history: List[QAPair] = Field(default_factory=list)
     notes: List[PlanNote] = Field(default_factory=list)
+    pending_questions: List["Question"] = Field(default_factory=list)  # Current questions awaiting answers
     created_at: str
     last_updated: str
     active: bool = True  # Can be marked inactive/parked
@@ -341,6 +342,7 @@ class SessionData(BaseModel):
     plan_state: PlanState = Field(default_factory=PlanState)
     coverage: CoverageMap = Field(default_factory=CoverageMap)  # Global coverage across all threads
     qa_history: List[QAPair] = Field(default_factory=list)  # Legacy; threads have their own history
+    pending_questions: List["Question"] = Field(default_factory=list)  # Legacy: current questions awaiting answers
 
     # v0.2 additions
     project_profile: ProjectProfile = Field(default_factory=ProjectProfile)
@@ -442,6 +444,17 @@ class ThreadAnswerResponse(BaseModel):
     phase_coverage: PhaseCoverageMap
     global_coverage: CoverageMap
     reflection_prompt: Optional[Question] = None  # If it's time for reflection
+
+
+class SubmitReflectionRequest(BaseModel):
+    """Request to submit a reflection for a thread."""
+    text: str = Field(..., min_length=1, max_length=5000, description="Reflection text")
+
+
+class SubmitReflectionResponse(BaseModel):
+    """Response from submitting a reflection."""
+    note: PlanNote
+    message: str = "Reflection captured successfully"
 
 
 # Model Registry Models
