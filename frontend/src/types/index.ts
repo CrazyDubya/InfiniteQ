@@ -8,9 +8,10 @@ export enum CoverageKey {
   CONSTRAINTS = "constraints",
   FEATURES = "features",
   ARCHITECTURE = "architecture",
+  DATA_ML = "data_ml",
   OPERATIONS = "operations",
   RISKS = "risks",
-  DELIVERABLES = "deliverables",
+  GTM = "gtm",
 }
 
 export interface CoverageMap {
@@ -19,9 +20,10 @@ export interface CoverageMap {
   constraints: number;
   features: number;
   architecture: number;
+  data_ml: number;
   operations: number;
   risks: number;
-  deliverables: number;
+  gtm: number;
 }
 
 export interface QuestionOption {
@@ -46,13 +48,18 @@ export interface Answer {
 
 export interface CreateSessionRequest {
   idea: string;
-  mode: "software" | "story" | "process" | "other";
+  mode?: Mode;
+  project_profile?: ProjectProfile;
+  persona_profile?: PersonaProfile;
 }
 
 export interface CreateSessionResponse {
   session_id: string;
+  thread_id: string;
   first_questions: Question[];
   coverage: CoverageMap;
+  project_profile: ProjectProfile;
+  persona_profile: PersonaProfile;
 }
 
 export interface AnswerRequest {
