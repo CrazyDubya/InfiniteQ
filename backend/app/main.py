@@ -155,10 +155,28 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
     debug_mode = os.environ.get("DEBUG", "false").lower() == "true"
-    uvicorn.run(
-        "app.main:app",
-        host="0.0.0.0",
-        port=port,
-        reload=debug_mode,  # Only enable reload in debug mode
-        log_level="debug" if debug_mode else "info"
-    )
+
+    # SSL/HTTPS configuration
+    ssl_keyfile = os.environ.get("SSL_KEYFILE")
+    ssl_certfile = os.environ.get("SSL_CERTFILE")
+    ssl_keyfile_password = os.environ.get("SSL_KEYFILE_PASSWORD")
+
+    uvicorn_config = {
+        "app": "app.main:app",
+        "host": "0.0.0.0",
+        "port": port,
+        "reload": debug_mode,  # Only enable reload in debug mode
+        "log_level": "debug" if debug_mode else "info",
+    }
+
+    # Add SSL configuration if certificates are provided
+    if ssl_certfile and ssl_keyfile:
+        uvicorn_config["ssl_keyfile"] = ssl_keyfile
+        uvicorn_config["ssl_certfile"] = ssl_certfile
+        if ssl_keyfile_password:
+            uvicorn_config["ssl_keyfile_password"] = ssl_keyfile_password
+        logger.info(f"Starting with HTTPS on port {port}")
+    else:
+        logger.info(f"Starting with HTTP on port {port} (no SSL certificates configured)")
+
+    uvicorn.run(**uvicorn_config)

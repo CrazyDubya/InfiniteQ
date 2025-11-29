@@ -2,6 +2,9 @@
 Session Manager: manages interview sessions and state.
 Version 0.2: Adds support for threads, profiles, and modes.
 Version 0.2.1: Adds persistent storage via session_store.
+=======
+Version 0.3: Adds pluggable storage backends (in-memory or Redis).
+>>>>>>> 5d0f59b (Add HTTPS support and Redis session persistence)
 """
 import uuid
 import logging
@@ -27,6 +30,9 @@ from app.models.schema import (
 from app.services.vultr_client import VultrClient
 from app.services.model_registry import ModelRegistry
 from app.services.session_store import create_session_store, SessionStoreBase
+=======
+from app.services.session_storage import SessionStorage, create_storage
+>>>>>>> 5d0f59b (Add HTTPS support and Redis session persistence)
 from app.prompts.templates import (
     IDEA_NORMALIZATION_SYSTEM,
     format_idea_normalization_prompt
@@ -40,6 +46,9 @@ class SessionManager:
     Manages interview sessions (v0.2: with threads and profiles).
     Handles session creation, state persistence, and lifecycle.
     v0.2.1: Now uses persistent storage (Redis or file-based).
+=======
+    v0.3: Uses pluggable storage backends (in-memory or Redis).
+>>>>>>> 5d0f59b (Add HTTPS support and Redis session persistence)
     """
 
     def __init__(
@@ -47,6 +56,9 @@ class SessionManager:
         vultr_client: VultrClient,
         model_registry: ModelRegistry,
         session_store: Optional[SessionStoreBase] = None
+=======
+        storage: Optional[SessionStorage] = None
+>>>>>>> 5d0f59b (Add HTTPS support and Redis session persistence)
     ):
         """
         Initialize session manager.
@@ -62,6 +74,13 @@ class SessionManager:
         self.store = session_store or create_session_store()
         # Keep in-memory dict for backwards compatibility, but prefer store
         self.sessions: Dict[str, SessionData] = {}
+=======
+            storage: Session storage backend (defaults to env-configured storage)
+        """
+        self.client = vultr_client
+        self.registry = model_registry
+        self.storage = storage or create_storage()
+>>>>>>> 5d0f59b (Add HTTPS support and Redis session persistence)
 
     def create_session(
         self,
@@ -125,6 +144,10 @@ class SessionManager:
             # Store session (both in memory and persistent store)
             self.sessions[session_id] = session
             self.store.save(session)
+=======
+            # Store session
+            self.storage.save(session_id, session)
+>>>>>>> 5d0f59b (Add HTTPS support and Redis session persistence)
 
             logger.info(f"Created session {session_id} with mode {mode.value}")
             return session
@@ -216,6 +239,10 @@ class SessionManager:
 
         # Persist session changes
         self.store.save(session)
+=======
+        # Persist changes
+        self.storage.save(session_id, session)
+>>>>>>> 5d0f59b (Add HTTPS support and Redis session persistence)
 
         logger.info(f"Created thread {thread_id} in session {session_id}")
         return thread
@@ -241,6 +268,9 @@ class SessionManager:
             self.sessions[session_id] = session
             logger.debug(f"Restored session {session_id} from persistent store")
         return session
+=======
+        return self.storage.get(session_id)
+>>>>>>> 5d0f59b (Add HTTPS support and Redis session persistence)
 
     def get_thread(self, session_id: str, thread_id: str) -> Optional[ThreadState]:
         """
@@ -281,6 +311,10 @@ class SessionManager:
 
         # Persist session changes
         self.store.save(session)
+=======
+        # Persist changes
+        self.storage.save(session_id, session)
+>>>>>>> 5d0f59b (Add HTTPS support and Redis session persistence)
 
         logger.info(f"Set active thread to {thread_id} in session {session_id}")
         return session
@@ -304,7 +338,11 @@ class SessionManager:
         Returns:
             Updated thread
         """
-        thread = self.get_thread(session_id, thread_id)
+        session = self.storage.get(session_id)
+        if not session:
+            raise ValueError(f"Session {session_id} not found")
+
+        thread = session.threads.get(thread_id)
         if not thread:
             raise ValueError(f"Thread {thread_id} not found")
 
@@ -319,6 +357,10 @@ class SessionManager:
         session = self.get_session(session_id)
         if session:
             self.store.save(session)
+=======
+        # Persist changes
+        self.storage.save(session_id, session)
+>>>>>>> 5d0f59b (Add HTTPS support and Redis session persistence)
 
         logger.info(f"Updated thread {thread_id}")
         return thread
@@ -344,7 +386,7 @@ class SessionManager:
         Returns:
             Updated session
         """
-        session = self.sessions.get(session_id)
+        session = self.storage.get(session_id)
         if not session:
             raise ValueError(f"Session {session_id} not found")
 
@@ -369,6 +411,9 @@ class SessionManager:
 
         # Persist changes
         self.store.save(session)
+=======
+        self.storage.save(session_id, session)
+>>>>>>> 5d0f59b (Add HTTPS support and Redis session persistence)
 
         logger.info(f"Updated session {session_id}")
         return session
@@ -392,7 +437,11 @@ class SessionManager:
         Returns:
             Updated thread
         """
-        thread = self.get_thread(session_id, thread_id)
+        session = self.storage.get(session_id)
+        if not session:
+            raise ValueError(f"Session {session_id} not found")
+
+        thread = session.threads.get(thread_id)
         if not thread:
             raise ValueError(f"Thread {thread_id} not found")
 
@@ -419,6 +468,10 @@ class SessionManager:
         session = self.get_session(session_id)
         if session:
             self.store.save(session)
+=======
+        # Persist changes
+        self.storage.save(session_id, session)
+>>>>>>> 5d0f59b (Add HTTPS support and Redis session persistence)
 
         return thread
 
@@ -460,7 +513,11 @@ class SessionManager:
         Returns:
             Created plan note
         """
-        thread = self.get_thread(session_id, thread_id)
+        session = self.storage.get(session_id)
+        if not session:
+            raise ValueError(f"Session {session_id} not found")
+
+        thread = session.threads.get(thread_id)
         if not thread:
             raise ValueError(f"Thread {thread_id} not found")
 
@@ -481,6 +538,10 @@ class SessionManager:
         session = self.get_session(session_id)
         if session:
             self.store.save(session)
+=======
+        # Persist changes
+        self.storage.save(session_id, session)
+>>>>>>> 5d0f59b (Add HTTPS support and Redis session persistence)
 
         logger.info(f"Added plan note to thread {thread_id}")
         return note
@@ -496,6 +557,9 @@ class SessionManager:
             Completed session
         """
         session = self.get_session(session_id)
+=======
+        session = self.storage.get(session_id)
+>>>>>>> 5d0f59b (Add HTTPS support and Redis session persistence)
         if not session:
             raise ValueError(f"Session {session_id} not found")
 
@@ -504,6 +568,9 @@ class SessionManager:
 
         # Persist changes
         self.store.save(session)
+=======
+        self.storage.save(session_id, session)
+>>>>>>> 5d0f59b (Add HTTPS support and Redis session persistence)
 
         logger.info(f"Completed session {session_id}")
         return session
@@ -522,12 +589,12 @@ class SessionManager:
             thread_id: Thread identifier (None for legacy session-level storage)
             questions: List of Question objects to store
         """
-        session = self.get_session(session_id)
+        session = self.storage.get(session_id)
         if not session:
             raise ValueError(f"Session {session_id} not found")
 
         if thread_id:
-            thread = self.get_thread(session_id, thread_id)
+            thread = session.threads.get(thread_id)
             if not thread:
                 raise ValueError(f"Thread {thread_id} not found")
             thread.pending_questions = questions
@@ -538,6 +605,9 @@ class SessionManager:
             session.pending_questions = questions
             session.updated_at = datetime.utcnow().isoformat()
             logger.debug(f"Stored {len(questions)} pending questions for session {session_id}")
+
+        # Persist changes
+        self.storage.save(session_id, session)
 
     def get_pending_questions(
         self,
@@ -579,16 +649,19 @@ class SessionManager:
             session_id: Session identifier
             thread_id: Thread identifier (None for legacy session-level storage)
         """
-        session = self.get_session(session_id)
+        session = self.storage.get(session_id)
         if not session:
             return
 
         if thread_id:
-            thread = self.get_thread(session_id, thread_id)
+            thread = session.threads.get(thread_id)
             if thread:
                 thread.pending_questions = []
         else:
             session.pending_questions = []
+
+        # Persist changes
+        self.storage.save(session_id, session)
 
     def _normalize_idea(self, idea: str, mode: str) -> IdeaBrief:
         """
@@ -650,7 +723,7 @@ class SessionManager:
         Returns:
             List of session IDs
         """
-        return list(self.sessions.keys())
+        return self.storage.list_ids()
 
     def list_threads(self, session_id: str) -> List[ThreadState]:
         """
@@ -713,3 +786,9 @@ class SessionManager:
             Count of sessions deleted
         """
         return self.store.cleanup_expired(max_age_hours)
+=======
+        deleted = self.storage.delete(session_id)
+        if deleted:
+            logger.info(f"Deleted session {session_id}")
+        return deleted
+>>>>>>> 5d0f59b (Add HTTPS support and Redis session persistence)
