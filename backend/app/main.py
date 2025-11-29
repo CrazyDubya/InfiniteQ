@@ -4,9 +4,13 @@ FastAPI application for InfiniteQ planning harness.
 import os
 import logging
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 from app.services.vultr_client import VultrClient
 from app.services.model_registry import ModelRegistry
@@ -27,6 +31,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Rate limiting configuration
+RATE_LIMIT_DEFAULT = os.environ.get("RATE_LIMIT_DEFAULT", "60/minute")
+RATE_LIMIT_SESSION = os.environ.get("RATE_LIMIT_SESSION", "10/minute")
+RATE_LIMIT_LLM = os.environ.get("RATE_LIMIT_LLM", "30/minute")
+
+limiter = Limiter(key_func=get_remote_address)
 
 # Global services
 vultr_client: VultrClient = None
@@ -100,13 +110,22 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# Add CORS middleware
+# Add rate limiter to app state and exception handler
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# CORS configuration - use environment variable for allowed origins
+ALLOWED_ORIGINS = os.environ.get(
+    "ALLOWED_ORIGINS",
+    "http://localhost:3000,http://localhost:5173,http://127.0.0.1:3000,http://127.0.0.1:5173"
+).split(",")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, restrict to specific origins
+    allow_origins=[origin.strip() for origin in ALLOWED_ORIGINS],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "X-Request-ID"],
 )
 
 # Include routes
@@ -135,10 +154,29 @@ async def health():
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(
-        "app.main:app",
-        host="0.0.0.0",
-        port=port,
-        reload=True,
-        log_level="info"
-    )
+    debug_mode = os.environ.get("DEBUG", "false").lower() == "true"
+
+    # SSL/HTTPS configuration
+    ssl_keyfile = os.environ.get("SSL_KEYFILE")
+    ssl_certfile = os.environ.get("SSL_CERTFILE")
+    ssl_keyfile_password = os.environ.get("SSL_KEYFILE_PASSWORD")
+
+    uvicorn_config = {
+        "app": "app.main:app",
+        "host": "0.0.0.0",
+        "port": port,
+        "reload": debug_mode,  # Only enable reload in debug mode
+        "log_level": "debug" if debug_mode else "info",
+    }
+
+    # Add SSL configuration if certificates are provided
+    if ssl_certfile and ssl_keyfile:
+        uvicorn_config["ssl_keyfile"] = ssl_keyfile
+        uvicorn_config["ssl_certfile"] = ssl_certfile
+        if ssl_keyfile_password:
+            uvicorn_config["ssl_keyfile_password"] = ssl_keyfile_password
+        logger.info(f"Starting with HTTPS on port {port}")
+    else:
+        logger.info(f"Starting with HTTP on port {port} (no SSL certificates configured)")
+
+    uvicorn.run(**uvicorn_config)

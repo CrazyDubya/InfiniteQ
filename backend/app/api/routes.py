@@ -2,8 +2,11 @@
 FastAPI routes for the InfiniteQ planning harness.
 Version 0.2: Adds thread management endpoints.
 """
+import os
 import logging
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 from app.models.schema import (
     CreateSessionRequest,
     CreateSessionResponse,
@@ -18,6 +21,8 @@ from app.models.schema import (
     UpdateThreadRequest,
     ThreadAnswerRequest,
     ThreadAnswerResponse,
+    SubmitReflectionRequest,
+    SubmitReflectionResponse,
 )
 from app.services.session_manager import SessionManager
 from app.services.question_engine import QuestionEngine
@@ -26,6 +31,11 @@ from app.services.plan_synthesizer import PlanSynthesizer
 from app.services.reflection_service import ReflectionService
 
 logger = logging.getLogger(__name__)
+
+# Rate limiting configuration
+RATE_LIMIT_SESSION = os.environ.get("RATE_LIMIT_SESSION", "10/minute")
+RATE_LIMIT_LLM = os.environ.get("RATE_LIMIT_LLM", "30/minute")
+limiter = Limiter(key_func=get_remote_address)
 
 router = APIRouter()
 
@@ -90,12 +100,14 @@ def _filter_plan_chunks_by_view(chunks: list, view_profile) -> list:
 
 
 @router.post("/session", response_model=CreateSessionResponse)
-async def create_session(request: CreateSessionRequest):
+@limiter.limit(RATE_LIMIT_SESSION)
+async def create_session(request: CreateSessionRequest, req: Request):
     """
     Create a new planning session (v0.2: with profiles and initial thread).
 
     Args:
         request: Session creation request
+        req: FastAPI request object (for rate limiting)
 
     Returns:
         Session ID, initial thread ID, and first questions
@@ -130,6 +142,13 @@ async def create_session(request: CreateSessionRequest):
             phase_coverage=initial_thread.phase_coverage
         )
 
+        # Store questions for retrieval when answers are submitted
+        _session_manager.store_pending_questions(
+            session_id=session.session_id,
+            thread_id=initial_thread.id,
+            questions=first_questions
+        )
+
         return CreateSessionResponse(
             session_id=session.session_id,
             thread_id=initial_thread.id,
@@ -145,13 +164,15 @@ async def create_session(request: CreateSessionRequest):
 
 
 @router.post("/session/{session_id}/answer", response_model=AnswerResponse)
-async def submit_answers(session_id: str, request: AnswerRequest):
+@limiter.limit(RATE_LIMIT_LLM)
+async def submit_answers(session_id: str, request: AnswerRequest, req: Request):
     """
     Submit answers and get next questions.
 
     Args:
         session_id: Session identifier
         request: Answer submission request
+        req: FastAPI request object (for rate limiting)
 
     Returns:
         Next questions and updated coverage
@@ -165,17 +186,10 @@ async def submit_answers(session_id: str, request: AnswerRequest):
         if session.completed:
             raise HTTPException(status_code=400, detail="Session already completed")
 
-        # Get the questions that were answered
-        # (In a real implementation, we'd store these; here we'll need to handle this differently)
-        # For now, we'll skip validation and just process the answers
+        # Retrieve pending questions from storage
+        questions = _session_manager.get_pending_questions(session_id, thread_id=None)
 
-        # Update plan based on answers
-        # We need the original questions - in production, store these in session
-        # For now, create dummy questions from answer IDs
-        questions = []  # Would be retrieved from session state
-
-        # Update plan state
-        # v0.2: Pass profile if available (backwards compatible)
+        # Update plan state with actual questions
         updated_plan = _plan_reducer.update_plan(
             plan_state=session.plan_state,
             questions=questions,
@@ -183,7 +197,7 @@ async def submit_answers(session_id: str, request: AnswerRequest):
             project_profile=session.project_profile
         )
 
-        # Update coverage
+        # Update coverage with actual questions
         updated_coverage = _plan_reducer.update_coverage(
             coverage=session.coverage,
             questions=questions,
@@ -199,9 +213,11 @@ async def submit_answers(session_id: str, request: AnswerRequest):
             coverage=updated_coverage
         )
 
+        # Clear pending questions since they've been answered
+        _session_manager.clear_pending_questions(session_id, thread_id=None)
+
         # Generate next questions
         round_number = len(session.qa_history) // 3  # Rough round estimation
-        # v0.2: Pass profiles if available (backwards compatible)
         next_questions = _question_engine.generate_questions(
             idea_brief=session.idea_brief,
             plan_state=updated_plan,
@@ -211,6 +227,9 @@ async def submit_answers(session_id: str, request: AnswerRequest):
             project_profile=session.project_profile,
             persona_profile=session.persona_profile
         )
+
+        # Store the new questions for the next answer round
+        _session_manager.store_pending_questions(session_id, thread_id=None, questions=next_questions)
 
         return AnswerResponse(
             next_questions=next_questions,
@@ -226,13 +245,15 @@ async def submit_answers(session_id: str, request: AnswerRequest):
 
 
 @router.post("/session/{session_id}/finish", response_model=FinishResponse)
-async def finish_session(session_id: str, request: FinishRequest):
+@limiter.limit(RATE_LIMIT_SESSION)
+async def finish_session(session_id: str, request: FinishRequest, req: Request):
     """
     Finish the session and generate final plan (v0.2: with view profile and execution bundle).
 
     Args:
         session_id: Session identifier
         request: Finish request with view profile
+        req: FastAPI request object (for rate limiting)
 
     Returns:
         Final JSON plan, markdown brief, and optional execution bundle
@@ -314,6 +335,13 @@ async def create_thread(session_id: str, request: CreateThreadRequest):
             thread_type=thread.type,
             plan_notes=thread.notes,
             phase_coverage=thread.phase_coverage
+        )
+
+        # Store questions for retrieval when answers are submitted
+        _session_manager.store_pending_questions(
+            session_id=session_id,
+            thread_id=thread.id,
+            questions=first_questions
         )
 
         return CreateThreadResponse(
@@ -412,7 +440,8 @@ async def activate_thread(session_id: str, thread_id: str):
 
 
 @router.post("/session/{session_id}/threads/{thread_id}/answer", response_model=ThreadAnswerResponse)
-async def submit_thread_answers(session_id: str, thread_id: str, request: ThreadAnswerRequest):
+@limiter.limit(RATE_LIMIT_LLM)
+async def submit_thread_answers(session_id: str, thread_id: str, request: ThreadAnswerRequest, req: Request):
     """
     Submit answers to a specific thread (v0.2).
 
@@ -420,6 +449,7 @@ async def submit_thread_answers(session_id: str, thread_id: str, request: Thread
         session_id: Session identifier
         thread_id: Thread identifier
         request: Answer request
+        req: FastAPI request object (for rate limiting)
 
     Returns:
         Next questions, coverage, and optional reflection prompt
@@ -437,9 +467,8 @@ async def submit_thread_answers(session_id: str, thread_id: str, request: Thread
         if session.completed:
             raise HTTPException(status_code=400, detail="Session already completed")
 
-        # TODO v0.2: Get original questions (would be stored in thread state)
-        # For now, we'll work without validation
-        questions = []
+        # Retrieve pending questions for this thread
+        questions = _session_manager.get_pending_questions(session_id, thread_id)
 
         # Update plan state (thread-aware)
         updated_plan = _plan_reducer.update_plan(
@@ -499,6 +528,10 @@ async def submit_thread_answers(session_id: str, thread_id: str, request: Thread
             phase_coverage=thread_refreshed.phase_coverage if thread_refreshed else thread.phase_coverage
         )
 
+        # Clear pending questions and store the new ones
+        _session_manager.clear_pending_questions(session_id, thread_id)
+        _session_manager.store_pending_questions(session_id, thread_id, next_questions)
+
         return ThreadAnswerResponse(
             next_questions=next_questions,
             thread_coverage=updated_thread_coverage,
@@ -514,15 +547,15 @@ async def submit_thread_answers(session_id: str, thread_id: str, request: Thread
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/session/{session_id}/threads/{thread_id}/reflect")
-async def submit_reflection(session_id: str, thread_id: str, reflection: dict):
+@router.post("/session/{session_id}/threads/{thread_id}/reflect", response_model=SubmitReflectionResponse)
+async def submit_reflection(session_id: str, thread_id: str, request: SubmitReflectionRequest):
     """
     Submit a reflection for a thread (v0.2).
 
     Args:
         session_id: Session identifier
         thread_id: Thread identifier
-        reflection: Dict with "text" field containing reflection
+        request: Validated reflection request with text field
 
     Returns:
         Created PlanNote
@@ -537,15 +570,11 @@ async def submit_reflection(session_id: str, thread_id: str, reflection: dict):
         if not thread:
             raise HTTPException(status_code=404, detail="Thread not found")
 
-        reflection_text = reflection.get("text", "").strip()
-        if not reflection_text:
-            raise HTTPException(status_code=400, detail="Reflection text required")
-
-        # Create plan note
+        # Create plan note (validation already done by Pydantic)
         plan_note = _reflection_service.create_plan_note(
             thread_id=thread_id,
             index_in_thread=thread.questions_asked,
-            raw_reflection=reflection_text,
+            raw_reflection=request.text.strip(),
             thread_type=thread.type,
             project_profile=session.project_profile.model_dump()
         )
@@ -561,10 +590,7 @@ async def submit_reflection(session_id: str, thread_id: str, reflection: dict):
 
         logger.info(f"Reflection captured for thread {thread_id}: {len(plan_note.tags)} tags")
 
-        return {
-            "note": plan_note.model_dump(),
-            "message": "Reflection captured successfully"
-        }
+        return SubmitReflectionResponse(note=plan_note)
 
     except HTTPException:
         raise

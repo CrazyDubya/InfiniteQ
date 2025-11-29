@@ -1,6 +1,7 @@
 """
 Session Manager: manages interview sessions and state.
 Version 0.2: Adds support for threads, profiles, and modes.
+Version 0.3: Adds pluggable storage backends (in-memory or Redis).
 """
 import uuid
 import logging
@@ -25,6 +26,7 @@ from app.models.schema import (
 )
 from app.services.vultr_client import VultrClient
 from app.services.model_registry import ModelRegistry
+from app.services.session_storage import SessionStorage, create_storage
 from app.prompts.templates import (
     IDEA_NORMALIZATION_SYSTEM,
     format_idea_normalization_prompt
@@ -37,12 +39,14 @@ class SessionManager:
     """
     Manages interview sessions (v0.2: with threads and profiles).
     Handles session creation, state persistence, and lifecycle.
+    v0.3: Uses pluggable storage backends (in-memory or Redis).
     """
 
     def __init__(
         self,
         vultr_client: VultrClient,
-        model_registry: ModelRegistry
+        model_registry: ModelRegistry,
+        storage: Optional[SessionStorage] = None
     ):
         """
         Initialize session manager.
@@ -50,10 +54,11 @@ class SessionManager:
         Args:
             vultr_client: Vultr API client
             model_registry: Model registry
+            storage: Session storage backend (defaults to env-configured storage)
         """
         self.client = vultr_client
         self.registry = model_registry
-        self.sessions: Dict[str, SessionData] = {}
+        self.storage = storage or create_storage()
 
     def create_session(
         self,
@@ -115,7 +120,7 @@ class SessionManager:
             session.active_thread_id = initial_thread.id
 
             # Store session
-            self.sessions[session_id] = session
+            self.storage.save(session_id, session)
 
             logger.info(f"Created session {session_id} with mode {mode.value}")
             return session
@@ -205,6 +210,9 @@ class SessionManager:
         session.threads[thread_id] = thread
         session.updated_at = timestamp
 
+        # Persist changes
+        self.storage.save(session_id, session)
+
         logger.info(f"Created thread {thread_id} in session {session_id}")
         return thread
 
@@ -218,7 +226,7 @@ class SessionManager:
         Returns:
             Session data or None
         """
-        return self.sessions.get(session_id)
+        return self.storage.get(session_id)
 
     def get_thread(self, session_id: str, thread_id: str) -> Optional[ThreadState]:
         """
@@ -257,6 +265,9 @@ class SessionManager:
         session.active_thread_id = thread_id
         session.updated_at = datetime.utcnow().isoformat()
 
+        # Persist changes
+        self.storage.save(session_id, session)
+
         logger.info(f"Set active thread to {thread_id} in session {session_id}")
         return session
 
@@ -279,7 +290,11 @@ class SessionManager:
         Returns:
             Updated thread
         """
-        thread = self.get_thread(session_id, thread_id)
+        session = self.storage.get(session_id)
+        if not session:
+            raise ValueError(f"Session {session_id} not found")
+
+        thread = session.threads.get(thread_id)
         if not thread:
             raise ValueError(f"Thread {thread_id} not found")
 
@@ -289,6 +304,9 @@ class SessionManager:
             thread.active = active
 
         thread.last_updated = datetime.utcnow().isoformat()
+
+        # Persist changes
+        self.storage.save(session_id, session)
 
         logger.info(f"Updated thread {thread_id}")
         return thread
@@ -314,7 +332,7 @@ class SessionManager:
         Returns:
             Updated session
         """
-        session = self.sessions.get(session_id)
+        session = self.storage.get(session_id)
         if not session:
             raise ValueError(f"Session {session_id} not found")
 
@@ -336,6 +354,9 @@ class SessionManager:
         # Keep Q&A history manageable (last 20 pairs)
         if len(session.qa_history) > 20:
             session.qa_history = session.qa_history[-20:]
+
+        # Persist changes
+        self.storage.save(session_id, session)
 
         logger.info(f"Updated session {session_id}")
         return session
@@ -359,7 +380,11 @@ class SessionManager:
         Returns:
             Updated thread
         """
-        thread = self.get_thread(session_id, thread_id)
+        session = self.storage.get(session_id)
+        if not session:
+            raise ValueError(f"Session {session_id} not found")
+
+        thread = session.threads.get(thread_id)
         if not thread:
             raise ValueError(f"Thread {thread_id} not found")
 
@@ -381,6 +406,9 @@ class SessionManager:
         # Keep thread history manageable (last 30 pairs)
         if len(thread.qa_history) > 30:
             thread.qa_history = thread.qa_history[-30:]
+
+        # Persist changes
+        self.storage.save(session_id, session)
 
         return thread
 
@@ -422,7 +450,11 @@ class SessionManager:
         Returns:
             Created plan note
         """
-        thread = self.get_thread(session_id, thread_id)
+        session = self.storage.get(session_id)
+        if not session:
+            raise ValueError(f"Session {session_id} not found")
+
+        thread = session.threads.get(thread_id)
         if not thread:
             raise ValueError(f"Thread {thread_id} not found")
 
@@ -439,6 +471,9 @@ class SessionManager:
         thread.questions_since_reflection = 0  # Reset counter
         thread.last_updated = datetime.utcnow().isoformat()
 
+        # Persist changes
+        self.storage.save(session_id, session)
+
         logger.info(f"Added plan note to thread {thread_id}")
         return note
 
@@ -452,15 +487,106 @@ class SessionManager:
         Returns:
             Completed session
         """
-        session = self.sessions.get(session_id)
+        session = self.storage.get(session_id)
         if not session:
             raise ValueError(f"Session {session_id} not found")
 
         session.completed = True
         session.updated_at = datetime.utcnow().isoformat()
 
+        # Persist changes
+        self.storage.save(session_id, session)
+
         logger.info(f"Completed session {session_id}")
         return session
+
+    def store_pending_questions(
+        self,
+        session_id: str,
+        thread_id: Optional[str],
+        questions: List
+    ) -> None:
+        """
+        Store pending questions for later retrieval when answers are submitted.
+
+        Args:
+            session_id: Session identifier
+            thread_id: Thread identifier (None for legacy session-level storage)
+            questions: List of Question objects to store
+        """
+        session = self.storage.get(session_id)
+        if not session:
+            raise ValueError(f"Session {session_id} not found")
+
+        if thread_id:
+            thread = session.threads.get(thread_id)
+            if not thread:
+                raise ValueError(f"Thread {thread_id} not found")
+            thread.pending_questions = questions
+            thread.last_updated = datetime.utcnow().isoformat()
+            logger.debug(f"Stored {len(questions)} pending questions for thread {thread_id}")
+        else:
+            # Legacy session-level storage
+            session.pending_questions = questions
+            session.updated_at = datetime.utcnow().isoformat()
+            logger.debug(f"Stored {len(questions)} pending questions for session {session_id}")
+
+        # Persist changes
+        self.storage.save(session_id, session)
+
+    def get_pending_questions(
+        self,
+        session_id: str,
+        thread_id: Optional[str] = None
+    ) -> List:
+        """
+        Retrieve pending questions for a session or thread.
+
+        Args:
+            session_id: Session identifier
+            thread_id: Thread identifier (None for legacy session-level storage)
+
+        Returns:
+            List of pending Question objects
+        """
+        session = self.get_session(session_id)
+        if not session:
+            raise ValueError(f"Session {session_id} not found")
+
+        if thread_id:
+            thread = self.get_thread(session_id, thread_id)
+            if not thread:
+                raise ValueError(f"Thread {thread_id} not found")
+            return thread.pending_questions
+        else:
+            # Legacy session-level storage
+            return session.pending_questions
+
+    def clear_pending_questions(
+        self,
+        session_id: str,
+        thread_id: Optional[str] = None
+    ) -> None:
+        """
+        Clear pending questions after they've been answered.
+
+        Args:
+            session_id: Session identifier
+            thread_id: Thread identifier (None for legacy session-level storage)
+        """
+        session = self.storage.get(session_id)
+        if not session:
+            return
+
+        if thread_id:
+            thread = session.threads.get(thread_id)
+            if thread:
+                thread.pending_questions = []
+        else:
+            session.pending_questions = []
+
+        # Persist changes
+        self.storage.save(session_id, session)
 
     def _normalize_idea(self, idea: str, mode: str) -> IdeaBrief:
         """
@@ -522,7 +648,7 @@ class SessionManager:
         Returns:
             List of session IDs
         """
-        return list(self.sessions.keys())
+        return self.storage.list_ids()
 
     def list_threads(self, session_id: str) -> List[ThreadState]:
         """
@@ -550,8 +676,7 @@ class SessionManager:
         Returns:
             True if deleted, False if not found
         """
-        if session_id in self.sessions:
-            del self.sessions[session_id]
+        deleted = self.storage.delete(session_id)
+        if deleted:
             logger.info(f"Deleted session {session_id}")
-            return True
-        return False
+        return deleted

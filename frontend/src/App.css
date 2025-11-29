@@ -464,3 +464,91 @@ button:disabled {
 .new-session-button {
   background: var(--gray-600);
 }
+
+/* Session Recovery Banner */
+.session-recovery-banner {
+  position: fixed;
+  top: 1rem;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--primary);
+  color: white;
+  padding: 1rem 1.5rem;
+  border-radius: 0.5rem;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+  z-index: 1000;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.session-recovery-banner span {
+  font-weight: 500;
+}
+
+.session-recovery-banner .recover-button,
+.session-recovery-banner .dismiss-button {
+  padding: 0.5rem 1rem;
+  border: none;
+  border-radius: 0.25rem;
+  font-size: 0.875rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.session-recovery-banner .recover-button {
+  background: white;
+  color: var(--primary);
+}
+
+.session-recovery-banner .recover-button:hover {
+  background: var(--gray-100);
+}
+
+.session-recovery-banner .dismiss-button {
+  background: transparent;
+  border: 1px solid white;
+  color: white;
+}
+
+.session-recovery-banner .dismiss-button:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+/* Loading spinner */
+.loading-spinner {
+  display: inline-block;
+  width: 1rem;
+  height: 1rem;
+  border: 2px solid transparent;
+  border-top-color: currentColor;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Responsive improvements */
+@media (max-width: 640px) {
+  .app {
+    padding: 1rem;
+  }
+
+  .session-recovery-banner {
+    width: calc(100% - 2rem);
+    flex-direction: column;
+    text-align: center;
+  }
+
+  .session-recovery-banner .recover-button,
+  .session-recovery-banner .dismiss-button {
+    width: 100%;
+  }
+}
