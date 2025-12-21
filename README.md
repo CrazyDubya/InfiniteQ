@@ -376,13 +376,41 @@ On "Finish":
 
 ## Future Enhancements
 
-- [ ] Redis/PostgreSQL persistence for session recovery
+- [x] Redis/PostgreSQL persistence for session recovery *(v0.2.1)*
+- [x] Intelligent execution bundle generation *(v0.2.1)*
+- [x] Semantic coverage quality assessment *(v0.2.1)*
+- [x] Smart reflection triggers *(v0.2.1)*
 - [ ] WebSocket support for real-time updates
 - [ ] Team collaboration features
 - [ ] Plan comparison and versioning
 - [ ] Export to project management tools
 - [ ] Custom question templates
 - [ ] Fine-tuned models for specific domains
+
+## Recent Improvements (v0.2.1)
+
+### Session Persistence
+Sessions are now persisted using Redis (if available) or file-based storage. Your planning sessions survive server restarts!
+
+```bash
+# Configure Redis (optional, falls back to file storage)
+export REDIS_URL=redis://localhost:6379/0
+
+# Or use file storage (default)
+export SESSION_STORAGE_DIR=./data/sessions
+```
+
+### Intelligent Execution Bundles
+Execution bundles are now generated using LLM, creating project-specific scaffolds, tasks, and prompts instead of generic templates.
+
+### Semantic Coverage Assessment
+Coverage quality is now assessed semantically by LLM, evaluating specificity, completeness, novelty, and clarity instead of just answer length.
+
+### Smart Reflection Triggers
+Reflections are triggered intelligently based on:
+- Coverage plateaus (no progress for 5+ questions)
+- Short answers (possible user confusion)
+- Large coverage imbalances between dimensions
 
 ## Contributing
 
