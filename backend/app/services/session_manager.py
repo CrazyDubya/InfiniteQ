@@ -1,6 +1,7 @@
 """
 Session Manager: manages interview sessions and state.
 Version 0.2: Adds support for threads, profiles, and modes.
+Version 0.2.1: Adds persistent storage via session_store.
 """
 import uuid
 import logging
@@ -25,6 +26,7 @@ from app.models.schema import (
 )
 from app.services.vultr_client import VultrClient
 from app.services.model_registry import ModelRegistry
+from app.services.session_store import create_session_store, SessionStoreBase
 from app.prompts.templates import (
     IDEA_NORMALIZATION_SYSTEM,
     format_idea_normalization_prompt
@@ -37,12 +39,14 @@ class SessionManager:
     """
     Manages interview sessions (v0.2: with threads and profiles).
     Handles session creation, state persistence, and lifecycle.
+    v0.2.1: Now uses persistent storage (Redis or file-based).
     """
 
     def __init__(
         self,
         vultr_client: VultrClient,
-        model_registry: ModelRegistry
+        model_registry: ModelRegistry,
+        session_store: Optional[SessionStoreBase] = None
     ):
         """
         Initialize session manager.
@@ -50,9 +54,13 @@ class SessionManager:
         Args:
             vultr_client: Vultr API client
             model_registry: Model registry
+            session_store: Optional persistent session store (defaults to hybrid store)
         """
         self.client = vultr_client
         self.registry = model_registry
+        # Use provided store or create default (Redis with file fallback)
+        self.store = session_store or create_session_store()
+        # Keep in-memory dict for backwards compatibility, but prefer store
         self.sessions: Dict[str, SessionData] = {}
 
     def create_session(
@@ -114,8 +122,9 @@ class SessionManager:
             session.threads[initial_thread.id] = initial_thread
             session.active_thread_id = initial_thread.id
 
-            # Store session
+            # Store session (both in memory and persistent store)
             self.sessions[session_id] = session
+            self.store.save(session)
 
             logger.info(f"Created session {session_id} with mode {mode.value}")
             return session
@@ -205,12 +214,15 @@ class SessionManager:
         session.threads[thread_id] = thread
         session.updated_at = timestamp
 
+        # Persist session changes
+        self.store.save(session)
+
         logger.info(f"Created thread {thread_id} in session {session_id}")
         return thread
 
     def get_session(self, session_id: str) -> Optional[SessionData]:
         """
-        Get session by ID.
+        Get session by ID (checks memory first, then persistent store).
 
         Args:
             session_id: Session identifier
@@ -218,7 +230,17 @@ class SessionManager:
         Returns:
             Session data or None
         """
-        return self.sessions.get(session_id)
+        # Check in-memory cache first
+        if session_id in self.sessions:
+            return self.sessions[session_id]
+
+        # Try persistent store (for sessions that survived restart)
+        session = self.store.load(session_id)
+        if session:
+            # Add to in-memory cache
+            self.sessions[session_id] = session
+            logger.debug(f"Restored session {session_id} from persistent store")
+        return session
 
     def get_thread(self, session_id: str, thread_id: str) -> Optional[ThreadState]:
         """
@@ -257,6 +279,9 @@ class SessionManager:
         session.active_thread_id = thread_id
         session.updated_at = datetime.utcnow().isoformat()
 
+        # Persist session changes
+        self.store.save(session)
+
         logger.info(f"Set active thread to {thread_id} in session {session_id}")
         return session
 
@@ -289,6 +314,11 @@ class SessionManager:
             thread.active = active
 
         thread.last_updated = datetime.utcnow().isoformat()
+
+        # Persist session changes
+        session = self.get_session(session_id)
+        if session:
+            self.store.save(session)
 
         logger.info(f"Updated thread {thread_id}")
         return thread
@@ -337,6 +367,9 @@ class SessionManager:
         if len(session.qa_history) > 20:
             session.qa_history = session.qa_history[-20:]
 
+        # Persist changes
+        self.store.save(session)
+
         logger.info(f"Updated session {session_id}")
         return session
 
@@ -381,6 +414,11 @@ class SessionManager:
         # Keep thread history manageable (last 30 pairs)
         if len(thread.qa_history) > 30:
             thread.qa_history = thread.qa_history[-30:]
+
+        # Persist session changes
+        session = self.get_session(session_id)
+        if session:
+            self.store.save(session)
 
         return thread
 
@@ -439,6 +477,11 @@ class SessionManager:
         thread.questions_since_reflection = 0  # Reset counter
         thread.last_updated = datetime.utcnow().isoformat()
 
+        # Persist session changes
+        session = self.get_session(session_id)
+        if session:
+            self.store.save(session)
+
         logger.info(f"Added plan note to thread {thread_id}")
         return note
 
@@ -452,12 +495,15 @@ class SessionManager:
         Returns:
             Completed session
         """
-        session = self.sessions.get(session_id)
+        session = self.get_session(session_id)
         if not session:
             raise ValueError(f"Session {session_id} not found")
 
         session.completed = True
         session.updated_at = datetime.utcnow().isoformat()
+
+        # Persist changes
+        self.store.save(session)
 
         logger.info(f"Completed session {session_id}")
         return session
@@ -542,7 +588,7 @@ class SessionManager:
 
     def delete_session(self, session_id: str) -> bool:
         """
-        Delete a session.
+        Delete a session from both memory and persistent store.
 
         Args:
             session_id: Session identifier
@@ -550,8 +596,38 @@ class SessionManager:
         Returns:
             True if deleted, False if not found
         """
+        deleted = False
+
+        # Delete from memory
         if session_id in self.sessions:
             del self.sessions[session_id]
+            deleted = True
+
+        # Delete from persistent store
+        if self.store.delete(session_id):
+            deleted = True
+
+        if deleted:
             logger.info(f"Deleted session {session_id}")
-            return True
-        return False
+        return deleted
+
+    def list_all_sessions(self) -> List[str]:
+        """
+        List all sessions from persistent store.
+
+        Returns:
+            List of all session IDs
+        """
+        return self.store.list_sessions()
+
+    def cleanup_expired_sessions(self, max_age_hours: int = 168) -> int:
+        """
+        Cleanup sessions older than max_age_hours.
+
+        Args:
+            max_age_hours: Maximum age in hours (default 7 days)
+
+        Returns:
+            Count of sessions deleted
+        """
+        return self.store.cleanup_expired(max_age_hours)
