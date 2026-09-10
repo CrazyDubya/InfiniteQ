@@ -246,7 +246,7 @@ export const ProfileForms: React.FC<ProfileFormsProps> = ({
         </div>
       </div>
 
-      <style jsx>{`
+      <style>{`
         .profile-forms {
           display: flex;
           flex-direction: column;

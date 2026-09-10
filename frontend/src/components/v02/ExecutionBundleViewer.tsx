@@ -198,7 +198,7 @@ export const ExecutionBundleViewer: React.FC<ExecutionBundleViewerProps> = ({ bu
         )}
       </div>
 
-      <style jsx>{`
+      <style>{`
         .execution-bundle {
           background: #ffffff;
           border-radius: 8px;

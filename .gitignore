@@ -55,3 +55,7 @@ coverage/
 
 # OS
 Thumbs.db
+
+# Persisted planning sessions (contain user project data)
+data/sessions/
+backend/data/sessions/

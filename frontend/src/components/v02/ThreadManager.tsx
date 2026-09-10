@@ -21,7 +21,6 @@ interface ThreadManagerProps {
 export const ThreadManager: React.FC<ThreadManagerProps> = ({
   threads,
   activeThreadId,
-  sessionId,
   onCreateThread,
   onActivateThread,
 }) => {
@@ -157,7 +156,7 @@ export const ThreadManager: React.FC<ThreadManagerProps> = ({
         ))}
       </div>
 
-      <style jsx>{`
+      <style>{`
         .thread-manager {
           background: #ffffff;
           border-radius: 8px;

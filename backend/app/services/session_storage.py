@@ -6,10 +6,9 @@ import json
 import logging
 import os
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import Dict, Optional, List
 from datetime import datetime
-
-import redis
 
 from app.models.schema import SessionData
 
@@ -71,6 +70,88 @@ class InMemoryStorage(SessionStorage):
         return session_id in self.sessions
 
 
+class FileStorage(SessionStorage):
+    """
+    File-backed session storage.
+
+    Gives persistence across restarts without requiring a Redis server, so
+    "keep planning across sessions" works on a plain local install.
+    """
+
+    def __init__(self, storage_dir: Optional[str] = None):
+        """
+        Initialize file storage.
+
+        Args:
+            storage_dir: Directory for session files (default from
+                SESSION_STORAGE_DIR env var, else ./data/sessions)
+        """
+        self.storage_dir = Path(
+            storage_dir or os.environ.get("SESSION_STORAGE_DIR", "./data/sessions")
+        )
+        self.storage_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Initialized file session storage at {self.storage_dir}")
+
+    def _path(self, session_id: str) -> Path:
+        """Resolve a session file path, rejecting ids that escape the directory."""
+        path = (self.storage_dir / f"{session_id}.json").resolve()
+        if path.parent != self.storage_dir.resolve():
+            raise ValueError(f"Invalid session id: {session_id}")
+        return path
+
+    def save(self, session_id: str, session: SessionData) -> None:
+        """Write session atomically so a crash mid-write can't corrupt it."""
+        path = self._path(session_id)
+        tmp = path.with_suffix(".json.tmp")
+        try:
+            tmp.write_text(session.model_dump_json())
+            tmp.replace(path)
+            logger.debug(f"Saved session {session_id} to {path}")
+        except Exception as e:
+            tmp.unlink(missing_ok=True)
+            logger.error(f"Failed to save session to file: {e}")
+            raise
+
+    def get(self, session_id: str) -> Optional[SessionData]:
+        try:
+            path = self._path(session_id)
+            if not path.exists():
+                return None
+            return SessionData.model_validate_json(path.read_text())
+        except Exception as e:
+            logger.error(f"Failed to read session from file: {e}")
+            return None
+
+    def delete(self, session_id: str) -> bool:
+        try:
+            path = self._path(session_id)
+            if path.exists():
+                path.unlink()
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"Failed to delete session file: {e}")
+            return False
+
+    def list_ids(self) -> List[str]:
+        try:
+            files = sorted(
+                self.storage_dir.glob("*.json"),
+                key=lambda f: f.stat().st_mtime,
+                reverse=True
+            )
+            return [f.stem for f in files]
+        except Exception as e:
+            logger.error(f"Failed to list session files: {e}")
+            return []
+
+    def exists(self, session_id: str) -> bool:
+        try:
+            return self._path(session_id).exists()
+        except Exception:
+            return False
+
+
 class RedisStorage(SessionStorage):
     """Redis-backed session storage for persistence across restarts."""
 
@@ -93,6 +174,16 @@ class RedisStorage(SessionStorage):
         )
         self.key_prefix = key_prefix
         self.ttl_seconds = ttl_seconds
+
+        # Imported lazily so the app still starts when redis is not installed.
+        try:
+            import redis
+        except ImportError as e:
+            logger.error("redis package not installed; cannot use Redis storage")
+            raise RuntimeError(
+                "Redis storage requested but the 'redis' package is not installed. "
+                "Install it (pip install redis) or set STORAGE_TYPE=file."
+            ) from e
 
         try:
             self.client = redis.from_url(
@@ -186,17 +277,33 @@ def create_storage(storage_type: Optional[str] = None) -> SessionStorage:
     """
     Factory function to create the appropriate storage backend.
 
+    Defaults to "file" so sessions survive a restart with no extra
+    infrastructure. Set STORAGE_TYPE=memory to opt out (useful for tests).
+
     Args:
-        storage_type: "redis" or "memory" (default from STORAGE_TYPE env var)
+        storage_type: "redis", "file", or "memory"
+            (default from STORAGE_TYPE env var, else "file")
 
     Returns:
         SessionStorage instance
     """
-    storage_type = storage_type or os.environ.get("STORAGE_TYPE", "memory")
+    storage_type = (storage_type or os.environ.get("STORAGE_TYPE", "file")).lower()
 
-    if storage_type.lower() == "redis":
+    if storage_type == "memory":
+        return InMemoryStorage()
+
+    if storage_type == "redis":
         redis_url = os.environ.get("REDIS_URL")
         ttl = int(os.environ.get("SESSION_TTL_SECONDS", 86400 * 7))
-        return RedisStorage(redis_url=redis_url, ttl_seconds=ttl)
-    else:
-        return InMemoryStorage()
+        try:
+            return RedisStorage(redis_url=redis_url, ttl_seconds=ttl)
+        except Exception as e:
+            # Degrade to file rather than taking the whole app down; sessions
+            # still persist, just not in Redis.
+            logger.warning(f"Redis storage unavailable ({e}); falling back to file storage")
+            return FileStorage()
+
+    if storage_type != "file":
+        logger.warning(f"Unknown STORAGE_TYPE '{storage_type}'; using file storage")
+
+    return FileStorage()

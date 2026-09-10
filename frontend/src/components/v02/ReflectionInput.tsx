@@ -128,7 +128,7 @@ export const ReflectionInput: React.FC<ReflectionInputProps> = ({
         </div>
       )}
 
-      <style jsx>{`
+      <style>{`
         .reflection-input {
           background: #ffffff;
           border-radius: 8px;
