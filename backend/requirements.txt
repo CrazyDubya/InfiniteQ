@@ -10,5 +10,9 @@ python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
 python-dotenv==1.0.0
 slowapi==0.1.9
-pytest==8.0.0
-pytest-asyncio==0.23.0
+# Not pinned exactly: pytest-asyncio 0.23.0's pytest_collectstart hook calls
+# collector.obj on a Package collector, which raises
+# "AttributeError: 'Package' object has no attribute 'obj'" and aborts the run
+# because backend/tests is a package. Fixed in 0.24.
+pytest>=8.2,<10
+pytest-asyncio>=0.24,<2
