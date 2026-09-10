@@ -1,7 +1,7 @@
 /**
  * Main application component
  */
-import React, { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { IdeaInput } from './components/IdeaInput';
 import { InterviewSession } from './components/InterviewSession';
 import { FinalPlan } from './components/FinalPlan';

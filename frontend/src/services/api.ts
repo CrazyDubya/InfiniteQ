@@ -9,8 +9,9 @@ import type {
   AnswerResponse,
   FinishResponse,
   FinishRequestV2,
-  ViewProfile,
 } from '../types';
+// An enum, so it must be a value import - it is used as ViewProfile.BUILDER.
+import { ViewProfile } from '../types';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || '/api/v1';
 
