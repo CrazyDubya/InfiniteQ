@@ -339,3 +339,89 @@ With these fixes, InfiniteQ would genuinely be a game-changing tool for project 
 - Missing input validation on API endpoints
 - No rate limiting or auth
 - Logging inconsistent across services
+
+---
+
+# Addendum: Findings from Actually Running the Code
+
+The scores above were derived from reading the code. Running it afterwards
+changed the picture materially, so this addendum records what execution
+revealed and corrects the record.
+
+## The evaluation above over-scored the system
+
+Every feature score above assumed the code ran. It did not. Three defects meant
+the API could not serve a single request:
+
+### 1. `main` did not import at all (critical)
+
+Commit `27c3d1b` committed **unresolved merge conflict markers** into
+`session_manager.py`. The module raised `SyntaxError` on import, so the FastAPI
+app could not start. Two agents had independently built a persistence layer
+(`session_store.py` and `session_storage.py`) and the merge was botched.
+
+**Fixed** — all 16 conflict regions resolved, the duplicate module removed.
+
+### 2. Every rate-limited endpoint raised at runtime (critical)
+
+`846c7af` added `@limiter.limit(...)` but named the Pydantic body `request` and
+the Starlette request `req`. slowapi resolves the request by looking for a
+parameter literally named `request`, found the Pydantic model, and raised:
+
+```
+Exception: parameter `request` must be an instance of starlette.requests.Request
+```
+
+This hit `create_session`, `submit_answers`, `finish_session` and
+`submit_thread_answers` — every endpoint that does real work.
+
+**Fixed** — body renamed to `payload`, Starlette request renamed to `request`,
+with a signature-level regression test so a future rename fails in CI.
+
+### 3. The test suite never ran, so neither defect was caught
+
+`test_v02_integration.py` was written against an API that did not exist: it
+called `/session` instead of `/api/v1/session`, and used profile fields absent
+from the schema (`founder_solo`, `tech_comfort: 8` where the model defines
+`comfort_with_tech: "low"|"medium"|"high"`). It also called the live Vultr API,
+so it could never run in CI. The unit suite constructed `Feature(...)` without
+its required `id`.
+
+**Fixed** — a `conftest.py` fake LLM client lets the whole request path run
+offline and deterministically. 34 tests pass with no network and no API key.
+
+## What this says about the original scores
+
+The feature-level scores measured *intent expressed in code*, not working
+behavior. A more honest framing:
+
+| Claim | Score above | Actual, before these fixes |
+|---|---|---|
+| Multi-Model Interview | 85% | 0% — endpoint raised on every call |
+| Coverage-Driven | 80% | 0% — unreachable |
+| Output for AI Agents | 75% | 0% — unreachable |
+| Any feature at all | various | 0% — app did not import |
+
+They are now genuinely reachable and exercised by tests.
+
+## The lesson worth keeping
+
+The original evaluation's biggest miss was **not running anything**. A review
+that only reads code will confidently score features that cannot execute. The
+single highest-value check was `python -m py_compile`, which would have caught
+the showstopper immediately.
+
+Recommendation: add CI that runs `pytest` plus an import check on every push.
+The suite is now fast (<1s) and hermetic, so there is no reason not to.
+
+## Still outstanding
+
+These remain open from the original recommendations:
+
+- Frontend v0.2 components exist but are not wired into the main app flow
+- `MODEL_PATTERNS` in `model_registry.py` are written as regex
+  (`"qwen.*coder"`, `"llama.*instruct"`) but matched with `in` as substrings,
+  so several never match — worth fixing or rewriting as real regex
+- No CI configuration in the repo
+- `intelligent_bundle_generator.py` and `coverage_assessor.py` are implemented
+  but not yet called from the request path

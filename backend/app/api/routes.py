@@ -101,13 +101,13 @@ def _filter_plan_chunks_by_view(chunks: list, view_profile) -> list:
 
 @router.post("/session", response_model=CreateSessionResponse)
 @limiter.limit(RATE_LIMIT_SESSION)
-async def create_session(request: CreateSessionRequest, req: Request):
+async def create_session(request: Request, payload: CreateSessionRequest):
     """
     Create a new planning session (v0.2: with profiles and initial thread).
 
     Args:
-        request: Session creation request
-        req: FastAPI request object (for rate limiting)
+        request: FastAPI request object (for rate limiting)
+        payload: Session creation request
 
     Returns:
         Session ID, initial thread ID, and first questions
@@ -115,10 +115,10 @@ async def create_session(request: CreateSessionRequest, req: Request):
     try:
         # Create session (automatically creates initial thread)
         session = _session_manager.create_session(
-            idea=request.idea,
-            mode=request.mode,
-            project_profile=request.project_profile,
-            persona_profile=request.persona_profile
+            idea=payload.idea,
+            mode=payload.mode,
+            project_profile=payload.project_profile,
+            persona_profile=payload.persona_profile
         )
 
         # Get the initial thread
@@ -165,14 +165,14 @@ async def create_session(request: CreateSessionRequest, req: Request):
 
 @router.post("/session/{session_id}/answer", response_model=AnswerResponse)
 @limiter.limit(RATE_LIMIT_LLM)
-async def submit_answers(session_id: str, request: AnswerRequest, req: Request):
+async def submit_answers(session_id: str, request: Request, payload: AnswerRequest):
     """
     Submit answers and get next questions.
 
     Args:
         session_id: Session identifier
-        request: Answer submission request
-        req: FastAPI request object (for rate limiting)
+        request: FastAPI request object (for rate limiting)
+        payload: Answer submission request
 
     Returns:
         Next questions and updated coverage
@@ -193,7 +193,7 @@ async def submit_answers(session_id: str, request: AnswerRequest, req: Request):
         updated_plan = _plan_reducer.update_plan(
             plan_state=session.plan_state,
             questions=questions,
-            answers=request.answers,
+            answers=payload.answers,
             project_profile=session.project_profile
         )
 
@@ -201,14 +201,14 @@ async def submit_answers(session_id: str, request: AnswerRequest, req: Request):
         updated_coverage = _plan_reducer.update_coverage(
             coverage=session.coverage,
             questions=questions,
-            answers=request.answers
+            answers=payload.answers
         )
 
         # Update session
         session = _session_manager.update_session(
             session_id=session_id,
             questions=questions,
-            answers=request.answers,
+            answers=payload.answers,
             plan_state=updated_plan,
             coverage=updated_coverage
         )
@@ -246,14 +246,14 @@ async def submit_answers(session_id: str, request: AnswerRequest, req: Request):
 
 @router.post("/session/{session_id}/finish", response_model=FinishResponse)
 @limiter.limit(RATE_LIMIT_SESSION)
-async def finish_session(session_id: str, request: FinishRequest, req: Request):
+async def finish_session(session_id: str, request: Request, payload: FinishRequest):
     """
     Finish the session and generate final plan (v0.2: with view profile and execution bundle).
 
     Args:
         session_id: Session identifier
-        request: Finish request with view profile
-        req: FastAPI request object (for rate limiting)
+        request: FastAPI request object (for rate limiting)
+        payload: Finish request with view profile
 
     Returns:
         Final JSON plan, markdown brief, and optional execution bundle
@@ -268,13 +268,13 @@ async def finish_session(session_id: str, request: FinishRequest, req: Request):
         final_plan, markdown_brief, execution_bundle = _plan_synthesizer.synthesize(
             plan_state=session.plan_state,
             idea_brief=session.idea_brief,
-            view_profile=request.view_profile,
+            view_profile=payload.view_profile,
             project_profile=session.project_profile,
-            include_execution_bundle=request.include_execution_bundle
+            include_execution_bundle=payload.include_execution_bundle
         )
 
         # v0.2: Filter plan chunks by view profile
-        plan_chunks = _filter_plan_chunks_by_view(session.plan_chunks, request.view_profile)
+        plan_chunks = _filter_plan_chunks_by_view(session.plan_chunks, payload.view_profile)
 
         # Mark session as completed
         _session_manager.complete_session(session_id)
@@ -441,15 +441,15 @@ async def activate_thread(session_id: str, thread_id: str):
 
 @router.post("/session/{session_id}/threads/{thread_id}/answer", response_model=ThreadAnswerResponse)
 @limiter.limit(RATE_LIMIT_LLM)
-async def submit_thread_answers(session_id: str, thread_id: str, request: ThreadAnswerRequest, req: Request):
+async def submit_thread_answers(session_id: str, thread_id: str, request: Request, payload: ThreadAnswerRequest):
     """
     Submit answers to a specific thread (v0.2).
 
     Args:
         session_id: Session identifier
         thread_id: Thread identifier
-        request: Answer request
-        req: FastAPI request object (for rate limiting)
+        request: FastAPI request object (for rate limiting)
+        payload: Answer request
 
     Returns:
         Next questions, coverage, and optional reflection prompt
@@ -474,7 +474,7 @@ async def submit_thread_answers(session_id: str, thread_id: str, request: Thread
         updated_plan = _plan_reducer.update_plan(
             plan_state=session.plan_state,
             questions=questions,
-            answers=request.answers,
+            answers=payload.answers,
             # v0.2: Pass thread context and notes
             thread_id=thread_id,
             plan_notes=thread.notes,
@@ -485,7 +485,7 @@ async def submit_thread_answers(session_id: str, thread_id: str, request: Thread
         updated_thread_coverage = _plan_reducer.update_coverage(
             coverage=thread.coverage,
             questions=questions,
-            answers=request.answers,
+            answers=payload.answers,
             phase_coverage=thread.phase_coverage  # v0.2: Update phase coverage in-place
         )
 
@@ -494,7 +494,7 @@ async def submit_thread_answers(session_id: str, thread_id: str, request: Thread
             session_id=session_id,
             thread_id=thread_id,
             questions=questions,
-            answers=request.answers
+            answers=payload.answers
         )
 
         # Check if reflection is needed

@@ -18,7 +18,9 @@ from backend.app.models.schema import (
     CoverageKey,
     PlanState,
     ViewProfile,
-    ProjectType
+    ProjectType,
+    PersonaRole,
+    Feature
 )
 from backend.app.services.plan_reducer import PlanReducer
 from backend.app.services.plan_synthesizer import PlanSynthesizer
@@ -214,9 +216,9 @@ class TestPlanSynthesizerV02:
         # Add some features
         from backend.app.models.schema import Feature
         plan_state.features = [
-            Feature(title="User authentication", must_have=True, notes="OAuth + JWT"),
-            Feature(title="Dashboard", must_have=True, notes="Main UI"),
-            Feature(title="Admin panel", must_have=False, notes="Nice to have")
+            Feature(id="F1", title="User authentication", must_have=True, notes="OAuth + JWT"),
+            Feature(id="F2", title="Dashboard", must_have=True, notes="Main UI"),
+            Feature(id="F3", title="Admin panel", must_have=False, notes="Nice to have")
         ]
 
         project_profile = ProjectProfile()
@@ -248,8 +250,8 @@ class TestPlanSynthesizerV02:
 
         from backend.app.models.schema import Feature, UserPersona
         plan_state.features = [
-            Feature(title="Appointment booking", must_have=True),
-            Feature(title="Reminders", must_have=True)
+            Feature(id="F1", title="Appointment booking", must_have=True),
+            Feature(id="F2", title="Reminders", must_have=True)
         ]
         plan_state.users = [
             UserPersona(role="Patient", needs=["Easy booking", "Reminders"])
@@ -340,10 +342,10 @@ class TestProfileIntegration:
         """Test persona profile has sensible defaults."""
         profile = PersonaProfile()
 
-        assert profile.role == PersonaRole.FOUNDER_SOLO
-        assert 0 <= profile.tech_comfort <= 10
-        assert 0 <= profile.business_comfort <= 10
-        assert profile.preferred_depth in ["light", "medium", "deep"]
+        assert profile.role == PersonaRole.FOUNDER_TECHNICAL
+        assert profile.comfort_with_tech in ["low", "medium", "high"]
+        assert profile.comfort_with_business in ["low", "medium", "high"]
+        assert profile.preferred_depth in ["light", "balanced", "deep"]
 
     def test_thread_types_available(self):
         """Test all thread types are defined."""
