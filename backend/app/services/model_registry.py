@@ -2,6 +2,7 @@
 Model Registry: discovers, categorizes, and selects Vultr models.
 """
 import logging
+import re
 from typing import List, Optional, Dict
 from app.models.schema import ModelInfo, ModelRole
 from app.services.vultr_client import VultrClient
@@ -51,6 +52,9 @@ class ModelRegistry:
         """
         self.client = vultr_client
         self.models: List[ModelInfo] = []
+        # Set when discovery fails and the hardcoded fallbacks are used, so a
+        # bad API key surfaces in /health instead of looking healthy.
+        self.discovery_error: Optional[str] = None
         self._models_by_role: Dict[ModelRole, List[ModelInfo]] = {
             role: [] for role in ModelRole
         }
@@ -92,10 +96,12 @@ class ModelRegistry:
             for role in ModelRole:
                 self._models_by_role[role].sort(key=lambda m: m.priority, reverse=True)
 
+            self.discovery_error = None
             logger.info(f"Categorized models: {self._get_role_counts()}")
             return self.models
 
         except Exception as e:
+            self.discovery_error = str(e)
             logger.error(f"Failed to discover models: {e}")
             # Fall back to hardcoded models
             return self._fallback_models()
@@ -103,6 +109,9 @@ class ModelRegistry:
     def _categorize_model(self, model_id: str) -> ModelRole:
         """
         Categorize a model by its ID.
+
+        Patterns are regular expressions (some of them, like "qwen.*think",
+        only make sense as such), matched most-specific-role first.
 
         Args:
             model_id: Model identifier
@@ -112,25 +121,15 @@ class ModelRegistry:
         """
         model_lower = model_id.lower()
 
-        # Check reasoning first (most specific)
-        for pattern in self.MODEL_PATTERNS[ModelRole.REASONING]:
-            if pattern in model_lower:
-                return ModelRole.REASONING
-
-        # Then code/tech
-        for pattern in self.MODEL_PATTERNS[ModelRole.CODE_TECH]:
-            if pattern in model_lower:
-                return ModelRole.CODE_TECH
-
-        # Then synthesis
-        for pattern in self.MODEL_PATTERNS[ModelRole.SYNTHESIS]:
-            if pattern in model_lower:
-                return ModelRole.SYNTHESIS
-
-        # Then strategy
-        for pattern in self.MODEL_PATTERNS[ModelRole.STRATEGY]:
-            if pattern in model_lower:
-                return ModelRole.STRATEGY
+        for role in (
+            ModelRole.REASONING,   # most specific
+            ModelRole.CODE_TECH,
+            ModelRole.SYNTHESIS,
+            ModelRole.STRATEGY,
+        ):
+            for pattern in self.MODEL_PATTERNS[role]:
+                if re.search(pattern, model_lower):
+                    return role
 
         # Default to general
         return ModelRole.GENERAL

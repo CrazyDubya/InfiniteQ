@@ -38,8 +38,9 @@ InfiniteQ uses multiple Vultr Serverless Inference models to conduct an adaptive
 ### Frontend (React + TypeScript + Vite)
 
 - Clean, responsive UI for the interview process
-- Real-time coverage visualization
-- Multiple-choice questions with "Other" option
+- Real-time coverage visualization (thread + overall)
+- Multiple-choice questions with an "Other" option
+- Profile form, thread manager, reflection input and execution bundle viewer
 - Final plan display with copy/download capabilities
 
 ## Prerequisites
@@ -106,6 +107,11 @@ The frontend will start on `http://localhost:3000`
 4. Hit "Continue" to get more questions or "Finish" to generate your plan
 5. Copy the plan and paste into your AI coding assistant!
 
+From the session screen you can also open extra threads (architecture, risk, GTM, …),
+switch between them, capture reflections, and pick the audience for the final plan
+(builder, stakeholder, investor or agent spec) — including a ready-to-use execution
+bundle.
+
 ## API Endpoints
 
 ### POST `/api/v1/session`
@@ -116,22 +122,49 @@ Create a new planning session.
 ```json
 {
   "idea": "Your project idea",
-  "mode": "software" | "story" | "process" | "other"
+  "mode": "kickoff" | "deep_dive" | "sanity_check",
+  "project_profile": {
+    "type": "saas",
+    "sophistication": "mvp",
+    "team_size": "solo",
+    "tech_constraints": ["python", "react"],
+    "timeline": "1-4_weeks",
+    "budget_band": "<1k",
+    "non_goals": ["mobile apps"]
+  },
+  "persona_profile": {
+    "role": "founder_technical",
+    "comfort_with_tech": "high",
+    "comfort_with_business": "medium",
+    "preferred_depth": "balanced"
+  }
 }
 ```
+
+`mode` defaults to `kickoff`; both profiles are optional and every field inside them
+has a default. See `backend/app/models/schema.py` for the allowed enum values.
 
 **Response:**
 ```json
 {
   "session_id": "uuid",
+  "thread_id": "uuid",
   "first_questions": [...],
-  "coverage": {...}
+  "coverage": {...},
+  "project_profile": {...},
+  "persona_profile": {...}
 }
 ```
 
+The session starts with one thread (the kickoff thread); `thread_id` is the id of
+that thread.
+
 ### POST `/api/v1/session/{id}/answer`
 
-Submit answers and get next questions.
+Submit answers and get next questions. The questions awaiting answers belong to the
+session's active thread, so this is the single-thread shorthand for the thread answer
+endpoint below; answers update that thread's coverage and the session's aggregated
+coverage.
 
 **Request:**
 ```json
@@ -167,9 +200,24 @@ Finish the session and generate final plan.
 }
 ```
 
+### Thread endpoints (v0.2)
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/api/v1/session/{id}/threads` | List threads and the active one |
+| POST | `/api/v1/session/{id}/threads` | Create a thread (type, title, root_prompt) |
+| PATCH | `/api/v1/session/{id}/threads/{tid}` | Rename a thread or park it (`active: false`) |
+| POST | `/api/v1/session/{id}/threads/{tid}/activate` | Make a thread the active one |
+| POST | `/api/v1/session/{id}/threads/{tid}/answer` | Answer questions in this thread |
+| POST | `/api/v1/session/{id}/threads/{tid}/reflect` | Submit a freeform reflection — body is `{"text": "..."}` |
+| GET | `/api/v1/session/{id}/threads/{tid}/insights` | Summarized reflections for a thread |
+
+Answering in a thread returns `thread_coverage`, `phase_coverage` and
+`global_coverage` (the session-level aggregate across all threads).
+
 ### GET `/api/v1/session/{id}/status`
 
-Get session status and metadata.
+Get session status and metadata (including a per-thread summary).
 
 ## Configuration
 
@@ -183,8 +231,25 @@ VULTR_INFERENCE_API_KEY=your_api_key_here
 
 # Optional
 PORT=8000
+DEBUG=false
 LOG_LEVEL=INFO
+ALLOWED_ORIGINS=http://localhost:3000,http://localhost:5173
+
+# Session storage: file (default) | redis | memory
+STORAGE_TYPE=file
+SESSION_STORAGE_DIR=./data/sessions
+REDIS_URL=redis://localhost:6379/0
+SESSION_TTL_SECONDS=604800
+
+# Rate limits, per client IP
+RATE_LIMIT_LLM=30/minute       # routes that call inference models
+RATE_LIMIT_SESSION=10/minute   # create/finish a session
+RATE_LIMIT_READ=120/minute     # reads and metadata updates
 ```
+
+`DEBUG=true` enables uvicorn auto-reload. Setting `SSL_CERTFILE` and `SSL_KEYFILE`
+switches the server to HTTPS. Every API route is rate limited — see
+`backend/app/api/rate_limit.py` for the policy.
 
 ### Frontend Environment Variables
 
@@ -197,29 +262,43 @@ VITE_API_URL=http://localhost:8000/api/v1
 
 ## Model Selection Strategy
 
-InfiniteQ automatically discovers available Vultr models and categorizes them:
+InfiniteQ discovers the available Vultr models and categorizes them by name pattern
+(see `backend/app/services/model_registry.py`):
 
-- **Reasoning**: Models like `deepseek-r1-distill-qwen-32b` for deep analysis
-- **Code/Tech**: Models like `qwen2.5-coder-32b-instruct` for technical questions
-- **Synthesis**: Large models like `llama-3.3-70b-instruct-fp8` for final synthesis
-- **Strategy**: Models like `kimi-k2-instruct` for high-level planning
+- **Reasoning**: `deepseek-r1-*`, `deepseek-reasoner`, `qwen*-think-*` for deep analysis
+- **Code/Tech**: any `*coder*` model (`qwen2.5-coder-32b-instruct`, `deepseek-coder-*`, …)
+- **Synthesis**: 70B-class models (`llama-3.3-70b-instruct-fp8`, `llama-3.1-70b-instruct`,
+  `qwen2.5-72b`, `kimi-k2-*`) for final synthesis
+- **Strategy**: `kimi`, `claude`, `gpt-4` and llama-instruct models for high-level planning
+
+Roles are matched most-specific-first, so a 70B `kimi-k2-instruct` is treated as a
+synthesis model rather than a strategy one.
 
 The system rotates through models across interview rounds to leverage diverse perspectives.
 
+If discovery fails, the app keeps running on a hardcoded model list and `/health` reports
+`"status": "degraded"` together with `model_discovery_error`, so a bad key cannot look
+like a healthy server.
+
 ## Coverage Dimensions
 
-The system tracks coverage across 8 dimensions:
+The system tracks coverage across 9 dimensions:
 
 1. **Problem**: What are we solving and why?
 2. **Users**: Who will use this and in what context?
 3. **Constraints**: Time, budget, technical, compliance limits
 4. **Features**: What functionality is needed?
 5. **Architecture**: How should it be built?
-6. **Operations**: Deployment, monitoring, maintenance
-7. **Risks**: What could go wrong and how to mitigate?
-8. **Deliverables**: What should the AI agent build?
+6. **Data/ML**: Data sources, pipelines, models
+7. **Operations**: Deployment, monitoring, maintenance
+8. **Risks**: What could go wrong and how to mitigate?
+9. **Go-to-market**: Positioning, pricing, launch
 
 Questions automatically target the lowest-coverage areas to ensure comprehensive planning.
+
+Coverage is tracked per thread and per lifecycle phase. Global (session-level) coverage
+aggregates the threads: each dimension takes the highest score any thread reached, so
+creating another (still empty) thread never lowers it.
 
 ## Development
 
@@ -258,19 +337,25 @@ InfiniteQ/
 ├── backend/
 │   ├── app/
 │   │   ├── api/
+│   │   │   ├── rate_limit.py      # Shared limiter + limit policy
 │   │   │   └── routes.py          # FastAPI endpoints
 │   │   ├── models/
 │   │   │   └── schema.py          # Pydantic models
 │   │   ├── services/
-│   │   │   ├── vultr_client.py    # Vultr API wrapper
+│   │   │   ├── vultr_client.py    # Vultr API wrapper (retries)
 │   │   │   ├── model_registry.py  # Model discovery & selection
-│   │   │   ├── session_manager.py # Session lifecycle
+│   │   │   ├── session_manager.py # Session lifecycle, coverage aggregation, write locking
+│   │   │   ├── session_storage.py # memory / file / redis backends
 │   │   │   ├── question_engine.py # Question generation
-│   │   │   ├── plan_reducer.py    # State updates
-│   │   │   └── plan_synthesizer.py # Final plan generation
+│   │   │   ├── plan_reducer.py    # State + coverage updates
+│   │   │   ├── plan_synthesizer.py # Final plan generation
+│   │   │   ├── reflection_service.py # Reflection pulses & note distillation
+│   │   │   ├── intelligent_bundle_generator.py # Model-generated bundles
+│   │   │   └── coverage_assessor.py # Semantic coverage/trigger helpers
 │   │   ├── prompts/
 │   │   │   └── templates.py       # LLM prompts
 │   │   └── main.py                # FastAPI app
+│   ├── tests/
 │   ├── requirements.txt
 │   └── .env.example
 ├── frontend/
@@ -280,7 +365,8 @@ InfiniteQ/
 │   │   │   ├── QuestionCard.tsx   # MC question display
 │   │   │   ├── CoverageDisplay.tsx # Coverage bars
 │   │   │   ├── InterviewSession.tsx # Main interview flow
-│   │   │   └── FinalPlan.tsx      # Results display
+│   │   │   ├── FinalPlan.tsx      # Results display
+│   │   │   └── v02/               # Profiles, threads, reflections, bundle viewer
 │   │   ├── services/
 │   │   │   └── api.ts             # Backend API client
 │   │   ├── types/
@@ -366,8 +452,9 @@ On "Finish":
 
 ### Models not discovered
 - Check your Vultr API key has access to Serverless Inference
+- `GET /health` returns `"status": "degraded"` and `model_discovery_error` when discovery
+  failed (the app is then running on fallback models)
 - Review backend logs for API errors
-- System will fall back to hardcoded models if discovery fails
 
 ### Questions seem repetitive
 - This can happen if coverage isn't updating properly
@@ -376,10 +463,13 @@ On "Finish":
 
 ## Future Enhancements
 
-- [x] Redis/PostgreSQL persistence for session recovery *(v0.2.1)*
+- [x] Persistence for session recovery — Redis or file-based *(v0.2.1)*
 - [x] Intelligent execution bundle generation *(v0.2.1)*
-- [x] Semantic coverage quality assessment *(v0.2.1)*
-- [x] Smart reflection triggers *(v0.2.1)*
+- [x] Deterministic reflection triggers *(v0.2.1)*
+- [ ] Semantic coverage quality assessment — `CoverageQualityAssessor` exists in
+      `backend/app/services/coverage_assessor.py` but is **not wired in**: it needs one
+      extra model call per answer round, so coverage still uses the deterministic
+      increment in `PlanReducer.update_coverage`
 - [ ] WebSocket support for real-time updates
 - [ ] Team collaboration features
 - [ ] Plan comparison and versioning
@@ -390,27 +480,43 @@ On "Finish":
 ## Recent Improvements (v0.2.1)
 
 ### Session Persistence
-Sessions are now persisted using Redis (if available) or file-based storage. Your planning sessions survive server restarts!
+Sessions are persisted to disk (default) or Redis, so a planning session survives a
+server restart. File writes are atomic, and every mutation is serialized per session.
 
 ```bash
-# Configure Redis (optional, falls back to file storage)
+# File storage (default)
+export STORAGE_TYPE=file
+export SESSION_STORAGE_DIR=./data/sessions
+
+# Redis (falls back to file storage if Redis is unreachable)
+export STORAGE_TYPE=redis
 export REDIS_URL=redis://localhost:6379/0
 
-# Or use file storage (default)
-export SESSION_STORAGE_DIR=./data/sessions
+# In-memory, no persistence (useful for tests)
+export STORAGE_TYPE=memory
 ```
 
+### Thread-Aware Planning Loop
+Answers are persisted where they belong: thread coverage, phase coverage, the canonical
+plan state and the session's aggregated coverage all survive the next request, so
+questions keep targeting whatever is still weak instead of restarting from zero.
+
 ### Intelligent Execution Bundles
-Execution bundles are now generated using LLM, creating project-specific scaffolds, tasks, and prompts instead of generic templates.
+Bundles are generated by the models from the finished plan (project-specific scaffolds,
+tasks and coding-tool prompts). If a model call fails, the built-in templates are used
+so generating a bundle never fails the request.
 
-### Semantic Coverage Assessment
-Coverage quality is now assessed semantically by LLM, evaluating specificity, completeness, novelty, and clarity instead of just answer length.
+### Deterministic Reflection Triggers
+Reflection pulses are decided from the conversation so far rather than a random roll:
 
-### Smart Reflection Triggers
-Reflections are triggered intelligently based on:
-- Coverage plateaus (no progress for 5+ questions)
-- Short answers (possible user confusion)
-- Large coverage imbalances between dimensions
+- At least 3 questions since the last reflection, forced at 12
+- Two or more very short answers in the last three (possible confusion)
+- A large coverage imbalance between dimensions
+
+### Not wired in: semantic coverage assessment
+`CoverageQualityAssessor` can score answers on specificity, completeness, novelty and
+clarity, but wiring it in costs one extra model call per answer round, so it is left
+unused for now.
 
 ## Contributing
 
@@ -441,20 +547,20 @@ Built with ❤️ using Vultr Serverless Inference, FastAPI, and React
 import requests
 
 # Create session with profiles
-response = requests.post("http://localhost:8000/session", json={
+response = requests.post("http://localhost:8000/api/v1/session", json={
     "idea": "AI-powered fitness coaching app",
     "mode": "kickoff",
     "project_profile": {
-        "type": "mobile_app",
+        "type": "saas",
         "team_size": "solo",
         "tech_constraints": ["react native", "firebase"],
         "timeline": "1-3_months",
         "budget_band": "1k-10k"
     },
     "persona_profile": {
-        "role": "founder_solo",
-        "tech_comfort": 7,
-        "business_comfort": 5,
+        "role": "founder_technical",
+        "comfort_with_tech": "high",
+        "comfort_with_business": "medium",
         "preferred_depth": "deep"
     }
 })
@@ -467,13 +573,13 @@ response = requests.post("http://localhost:8000/session", json={
 session_id = "your-session-id"
 
 # Architecture thread
-requests.post(f"http://localhost:8000/session/{session_id}/threads", json={
+requests.post(f"http://localhost:8000/api/v1/session/{session_id}/threads", json={
     "type": "architecture",
     "title": "Backend & Infrastructure"
 })
 
 # Risk assessment thread
-requests.post(f"http://localhost:8000/session/{session_id}/threads", json={
+requests.post(f"http://localhost:8000/api/v1/session/{session_id}/threads", json={
     "type": "risk",
     "title": "Technical & Business Risks"
 })
@@ -485,8 +591,8 @@ requests.post(f"http://localhost:8000/session/{session_id}/threads", json={
 # Submit freeform insights
 thread_id = "your-thread-id"
 
-requests.post(f"http://localhost:8000/session/{session_id}/threads/{thread_id}/reflect", json={
-    "reflection": "Budget constraint: Only $5k for v1. Must use free tiers."
+requests.post(f"http://localhost:8000/api/v1/session/{session_id}/threads/{thread_id}/reflect", json={
+    "text": "Budget constraint: Only $5k for v1. Must use free tiers."
 })
 
 # Returns tagged note:
@@ -502,7 +608,7 @@ requests.post(f"http://localhost:8000/session/{session_id}/threads/{thread_id}/r
 
 ```python
 # Generate ready-to-use artifacts
-response = requests.post(f"http://localhost:8000/session/{session_id}/finish", json={
+response = requests.post(f"http://localhost:8000/api/v1/session/{session_id}/finish", json={
     "view_profile": "builder",  # or "stakeholder", "investor", "agent_spec"
     "include_execution_bundle": True
 })
@@ -546,5 +652,11 @@ pytest backend/tests/test_v02_integration.py
 
 # Run unit tests
 pytest backend/tests/test_services_v02.py
+
+# Planning loop regressions (thread persistence + coverage aggregation)
+pytest backend/tests/test_planning_loop.py
+
+# Execution bundles, rate limiting, retries, triggers, write locking
+pytest backend/tests/test_execution_bundles.py backend/tests/test_hardening.py
 ```
 

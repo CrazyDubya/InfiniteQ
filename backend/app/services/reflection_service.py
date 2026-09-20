@@ -16,6 +16,7 @@ from app.models.schema import (
 )
 from app.services.vultr_client import VultrClient
 from app.services.model_registry import ModelRegistry
+from app.services.coverage_assessor import SmartReflectionTrigger
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +60,8 @@ class ReflectionService:
         """
         self.client = vultr_client
         self.registry = model_registry
+        # Single owner of the "is it time to reflect?" policy.
+        self.trigger = SmartReflectionTrigger(vultr_client, model_registry)
 
     def generate_reflection_question(
         self,
@@ -247,35 +250,31 @@ class ReflectionService:
         logger.info(f"Created PlanNote {note.id} with {len(tags)} tags")
         return note
 
-    def should_inject_reflection(
-        self,
-        thread: ThreadState,
-        min_questions: int = 5,
-        max_questions: int = 10
-    ) -> bool:
+    def should_inject_reflection(self, thread: ThreadState) -> bool:
         """
         Determine if a reflection should be injected.
 
+        Delegates to SmartReflectionTrigger, which decides deterministically
+        from the conversation so far (interval bounds, short answers, coverage
+        imbalance) rather than a random roll, so the same thread always yields
+        the same answer.
+
         Args:
             thread: Thread state
-            min_questions: Minimum questions before first reflection
-            max_questions: Maximum questions before forcing reflection
 
         Returns:
             True if reflection should be injected
         """
-        # Must have asked at least min_questions since last reflection
-        if thread.questions_since_reflection < min_questions:
-            return False
+        should_trigger, reason = self.trigger.should_trigger_reflection(
+            questions_since_last=thread.questions_since_reflection,
+            recent_answers=[pair.answer for pair in thread.qa_history[-3:]],
+            coverage_map=thread.coverage
+        )
 
-        # Force reflection if at max_questions
-        if thread.questions_since_reflection >= max_questions:
-            return True
+        if should_trigger:
+            logger.info(f"Reflection triggered for thread {thread.id}: {reason}")
 
-        # Otherwise, probabilistic based on how close to max
-        progress = (thread.questions_since_reflection - min_questions) / (max_questions - min_questions)
-        import random
-        return random.random() < progress * 0.5  # Up to 50% chance
+        return should_trigger
 
     def extract_insights_from_notes(
         self,

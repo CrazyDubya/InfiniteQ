@@ -39,6 +39,12 @@ class VultrClient:
             total=3,
             backoff_factor=1,
             status_forcelist=[429, 500, 502, 503, 504],
+            # urllib3 only retries idempotent methods by default, which would
+            # silently exclude every chat completion (they are POSTs) - the
+            # exact calls these retries are meant for. The statuses above are
+            # only returned when the request was not served, so retrying them
+            # cannot double-charge a successful completion.
+            allowed_methods=frozenset(["GET", "POST"]),
         )
         adapter = HTTPAdapter(max_retries=retry_strategy)
         session.mount("https://", adapter)

@@ -1,21 +1,37 @@
 /**
- * Initial idea input component
+ * Initial idea input component.
+ *
+ * Optionally collects the project and persona profiles, which the backend uses
+ * to make the interview questions context-aware.
  */
 import React, { useState } from 'react';
+import { ProfileForms } from './v02/ProfileForms';
+import { Mode } from '../types';
+import type { PersonaProfile, ProjectProfile } from '../types';
+
+export interface SessionProfiles {
+  project: ProjectProfile;
+  persona: PersonaProfile;
+}
 
 interface IdeaInputProps {
-  onSubmit: (idea: string, mode: string) => void;
+  onSubmit: (idea: string, mode: Mode, profiles: SessionProfiles) => void;
   loading: boolean;
 }
 
 export const IdeaInput: React.FC<IdeaInputProps> = ({ onSubmit, loading }) => {
   const [idea, setIdea] = useState('');
-  const [mode, setMode] = useState('software');
+  const [mode, setMode] = useState<Mode>(Mode.KICKOFF);
+  const [showProfiles, setShowProfiles] = useState(false);
+  const [profiles, setProfiles] = useState<SessionProfiles>({
+    project: {},
+    persona: {},
+  });
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (idea.trim()) {
-      onSubmit(idea, mode);
+      onSubmit(idea, mode, profiles);
     }
   };
 
@@ -43,19 +59,33 @@ export const IdeaInput: React.FC<IdeaInputProps> = ({ onSubmit, loading }) => {
         </div>
 
         <div className="form-group">
-          <label htmlFor="mode">Project Type</label>
+          <label htmlFor="mode">Interview Mode</label>
           <select
             id="mode"
             value={mode}
-            onChange={(e) => setMode(e.target.value)}
+            onChange={(e) => setMode(e.target.value as Mode)}
             disabled={loading}
           >
-            <option value="software">Software Application</option>
-            <option value="story">Story/Narrative</option>
-            <option value="process">Process/Workflow</option>
-            <option value="other">Other</option>
+            <option value={Mode.KICKOFF}>Kickoff - broad initial coverage</option>
+            <option value={Mode.DEEP_DIVE}>Deep dive - focus on one area</option>
+            <option value={Mode.SANITY_CHECK}>Sanity check - review a plan</option>
           </select>
         </div>
+
+        <button
+          type="button"
+          className="toggle-profiles-button"
+          onClick={() => setShowProfiles(!showProfiles)}
+          disabled={loading}
+        >
+          {showProfiles ? 'Hide profiles' : 'Add project & persona profiles (optional)'}
+        </button>
+
+        {showProfiles && (
+          <ProfileForms
+            onProfilesChange={(project, persona) => setProfiles({ project, persona })}
+          />
+        )}
 
         <button type="submit" disabled={loading || !idea.trim()}>
           {loading ? 'Starting...' : 'Start Planning Session'}

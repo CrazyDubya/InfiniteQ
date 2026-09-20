@@ -9,9 +9,8 @@ Demonstrates all v0.2 features:
 """
 import requests
 import json
-import time
 
-BASE_URL = "http://localhost:8000"
+BASE_URL = "http://localhost:8000/api/v1"
 
 
 def print_section(title):
@@ -39,9 +38,9 @@ def main():
             "non_goals": ["mobile apps in v1", "blockchain integration"]
         },
         "persona_profile": {
-            "role": "founder_team",
-            "tech_comfort": 8,
-            "business_comfort": 7,
+            "role": "founder_technical",
+            "comfort_with_tech": "high",
+            "comfort_with_business": "high",
             "preferred_depth": "deep"
         }
     })
@@ -55,7 +54,7 @@ def main():
     print(f"Team Size: {session['project_profile']['team_size']}")
     print(f"Timeline: {session['project_profile']['timeline']}")
     print(f"Persona: {session['persona_profile']['role']}")
-    print(f"Tech Comfort: {session['persona_profile']['tech_comfort']}/10")
+    print(f"Tech Comfort: {session['persona_profile']['comfort_with_tech']}")
 
     # 2. Create specialized threads
     print_section("2. Creating Specialized Threads")
@@ -67,14 +66,17 @@ def main():
     ]
 
     thread_ids = {"kickoff": kickoff_thread}
+    pending_questions = {"kickoff": session["first_questions"]}
 
     for thread_config in threads_to_create:
         response = requests.post(
             f"{BASE_URL}/session/{session_id}/threads",
             json=thread_config
         )
-        thread = response.json()["thread"]
+        created = response.json()
+        thread = created["thread"]
         thread_ids[thread_config["type"]] = thread["id"]
+        pending_questions[thread_config["type"]] = created["first_questions"]
         print(f"✓ Created {thread_config['type']} thread: {thread['title']}")
 
     # 3. Work on architecture thread
@@ -86,13 +88,32 @@ def main():
     requests.post(f"{BASE_URL}/session/{session_id}/threads/{arch_thread_id}/activate")
     print(f"Activated architecture thread: {arch_thread_id}")
 
-    # Simulate answering questions
-    for i in range(3):
-        # Get current questions
-        status_response = requests.get(f"{BASE_URL}/session/{session_id}/status")
-        # Answer them (simplified - would show real questions in UI)
-        print(f"  Round {i+1}: Answered architecture questions")
-        time.sleep(0.5)  # Simulate user thinking
+    # Answer two rounds of questions on the architecture thread. Answers are
+    # persisted per thread, so coverage accumulates round over round.
+    questions = pending_questions["architecture"]
+    for round_number in range(1, 3):
+        answer_response = requests.post(
+            f"{BASE_URL}/session/{session_id}/threads/{arch_thread_id}/answer",
+            json={
+                "answers": [
+                    {
+                        "question_id": q["id"],
+                        "choice_id": q["options"][0]["id"],
+                        "free_text": (
+                            "Horizontally scalable services behind a load balancer, "
+                            "with Postgres and an event log for real-time collaboration."
+                        ),
+                    }
+                    for q in questions
+                ]
+            }
+        )
+        data = answer_response.json()
+        thread_avg = sum(data["thread_coverage"].values()) / len(data["thread_coverage"])
+        global_avg = sum(data["global_coverage"].values()) / len(data["global_coverage"])
+        print(f"  Round {round_number}: answered {len(questions)} questions "
+              f"→ thread coverage {thread_avg:.0f}%, global {global_avg:.0f}%")
+        questions = data["next_questions"]
 
     # 4. Submit reflection
     print_section("4. Submitting Reflection")
@@ -100,7 +121,7 @@ def main():
     reflection_response = requests.post(
         f"{BASE_URL}/session/{session_id}/threads/{arch_thread_id}/reflect",
         json={
-            "reflection": """
+            "text": """
             Critical insight: We need to handle 50k concurrent users from day 1.
             The backend must be horizontally scalable - thinking microservices with
             Kubernetes. Also, data consistency is crucial for real-time collaboration,
@@ -121,10 +142,8 @@ def main():
         f"{BASE_URL}/session/{session_id}/threads/{arch_thread_id}/insights"
     )
     insights = insights_response.json()
-    print(f"\nInsights extracted:")
-    for category, items in insights["insights_by_type"].items():
-        if items:
-            print(f"  {category.capitalize()}: {len(items)} items")
+    print(f"\nInsights extracted from {insights['note_count']} note(s):")
+    print(insights["insights"])
 
     # 6. Work on risk thread
     print_section("5. Risk Assessment Thread")
@@ -136,7 +155,7 @@ def main():
     risk_reflection = requests.post(
         f"{BASE_URL}/session/{session_id}/threads/{risk_thread_id}/reflect",
         json={
-            "reflection": """
+            "text": """
             Main risks: 1) Competitive market - Slack, Teams already dominate.
             2) AI features might not be differentiated enough. 3) Enterprise sales
             cycle is long (6-12 months). 4) Need SOC 2 compliance which takes time.

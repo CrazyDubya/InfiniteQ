@@ -4,14 +4,14 @@ FastAPI application for InfiniteQ planning harness.
 import os
 import logging
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request
+from typing import Optional
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
-from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
+from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
+from app.api.rate_limit import limiter
 from app.services.vultr_client import VultrClient
 from app.services.model_registry import ModelRegistry
 from app.services.session_manager import SessionManager
@@ -31,21 +31,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Rate limiting configuration
-RATE_LIMIT_DEFAULT = os.environ.get("RATE_LIMIT_DEFAULT", "60/minute")
-RATE_LIMIT_SESSION = os.environ.get("RATE_LIMIT_SESSION", "10/minute")
-RATE_LIMIT_LLM = os.environ.get("RATE_LIMIT_LLM", "30/minute")
-
-limiter = Limiter(key_func=get_remote_address)
-
-# Global services
-vultr_client: VultrClient = None
-model_registry: ModelRegistry = None
-session_manager: SessionManager = None
-question_engine: QuestionEngine = None
-plan_reducer: PlanReducer = None
-plan_synthesizer: PlanSynthesizer = None
-reflection_service: ReflectionService = None
+# Global services (populated by the lifespan handler on startup)
+vultr_client: Optional[VultrClient] = None
+model_registry: Optional[ModelRegistry] = None
+session_manager: Optional[SessionManager] = None
+question_engine: Optional[QuestionEngine] = None
+plan_reducer: Optional[PlanReducer] = None
+plan_synthesizer: Optional[PlanSynthesizer] = None
+reflection_service: Optional[ReflectionService] = None
 
 
 @asynccontextmanager
@@ -144,10 +137,16 @@ async def root():
 
 @app.get("/health")
 async def health():
-    """Health check endpoint."""
+    """
+    Health check endpoint.
+
+    ``model_discovery_error`` is reported so a bad API key shows up here
+    instead of looking healthy while every inference call fails.
+    """
     return {
-        "status": "healthy",
-        "models_available": len(model_registry.get_all_models()) if model_registry else 0
+        "status": "healthy" if model_registry and not model_registry.discovery_error else "degraded",
+        "models_available": len(model_registry.get_all_models()) if model_registry else 0,
+        "model_discovery_error": model_registry.discovery_error if model_registry else None
     }
 
 

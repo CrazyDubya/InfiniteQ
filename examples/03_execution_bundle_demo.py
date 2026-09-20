@@ -6,7 +6,7 @@ Shows how to generate and use execution bundles for immediate project kickoff.
 import requests
 import json
 
-BASE_URL = "http://localhost:8000"
+BASE_URL = "http://localhost:8000/api/v1"
 
 
 def main():
@@ -17,26 +17,47 @@ def main():
     session_response = requests.post(f"{BASE_URL}/session", json={
         "idea": "Mobile app for personal finance management with AI budgeting assistant",
         "project_profile": {
-            "type": "mobile_app",
+            "type": "saas",
             "team_size": "solo",
             "tech_constraints": ["react native", "firebase", "openai api"],
             "timeline": "1-3_months",
             "budget_band": "1k-10k"
         },
         "persona_profile": {
-            "role": "founder_solo",
-            "tech_comfort": 7,
-            "business_comfort": 5,
-            "preferred_depth": "medium"
+            "role": "founder_technical",
+            "comfort_with_tech": "high",
+            "comfort_with_business": "medium",
+            "preferred_depth": "balanced"
         }
     })
 
-    session_id = session_response.json()["session_id"]
+    session = session_response.json()
+    session_id = session["session_id"]
+    thread_id = session["thread_id"]
     print(f"✓ Session: {session_id}\n")
 
-    # Answer a few questions (simplified for demo)
-    # In real usage, you'd go through the full interview
+    # Answer one round so the bundle is built from real input.
+    # In real usage you'd keep going through the full interview.
     print("Going through planning interview...\n")
+    questions = session["first_questions"]
+    answer_response = requests.post(
+        f"{BASE_URL}/session/{session_id}/threads/{thread_id}/answer",
+        json={
+            "answers": [
+                {
+                    "question_id": q["id"],
+                    "choice_id": q["options"][0]["id"],
+                    "free_text": (
+                        "Solo developer, so keep it to one deployable service; "
+                        "bank sync via Plaid and budgets computed on the server."
+                    ),
+                }
+                for q in questions
+            ]
+        }
+    )
+    answer_response.raise_for_status()
+    print(f"✓ Answered {len(questions)} questions in the kickoff thread\n")
 
     # Finish with execution bundle
     print("Generating execution bundle...")

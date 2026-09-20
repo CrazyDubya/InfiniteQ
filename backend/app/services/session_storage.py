@@ -245,11 +245,18 @@ class RedisStorage(SessionStorage):
             return False
 
     def list_ids(self) -> List[str]:
-        """List all session IDs."""
+        """
+        List all session IDs.
+
+        Uses SCAN rather than KEYS: KEYS blocks the server for the whole
+        keyspace, which is not acceptable against a shared Redis.
+        """
         try:
-            keys = self.client.keys(f"{self.key_prefix}*")
             prefix_len = len(self.key_prefix)
-            return [key[prefix_len:] for key in keys]
+            return [
+                key[prefix_len:]
+                for key in self.client.scan_iter(match=f"{self.key_prefix}*", count=100)
+            ]
         except Exception as e:
             logger.error(f"Failed to list sessions from Redis: {e}")
             return []
