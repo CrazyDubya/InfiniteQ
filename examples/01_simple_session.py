@@ -6,7 +6,7 @@ Demonstrates basic v0.2 usage with minimal configuration.
 import requests
 import json
 
-BASE_URL = "http://localhost:8000"
+BASE_URL = "http://localhost:8000/api/v1"
 
 
 def main():
@@ -61,7 +61,8 @@ def main():
     status_response = requests.get(f"{BASE_URL}/session/{session_id}/status")
     status = status_response.json()
 
-    print(f"   Total questions: {status['total_questions']}")
+    questions_asked = sum(thread["questions_asked"] for thread in status["threads"])
+    print(f"   Questions asked: {questions_asked}")
     print(f"   Active thread: {status['active_thread_id']}")
     print(f"   Coverage: {status['coverage']['features']:.0f}% features, {status['coverage']['architecture']:.0f}% architecture")
     print()

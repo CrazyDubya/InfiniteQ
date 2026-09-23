@@ -50,6 +50,28 @@ def test_session_creation_is_rate_limited(limited_client):
     assert 500 not in statuses, f"limiter raised instead of rejecting: {statuses}"
 
 
+def test_llm_heavy_route_is_rate_limited(limited_client):
+    """
+    Thread creation calls several models, so it is a target for abuse and must
+    be metered rather than left open.
+    """
+    session_id = limited_client.post(
+        f"{API}/session", json={"idea": "A small tool"}
+    ).json()["session_id"]
+
+    statuses = [
+        limited_client.post(
+            f"{API}/session/{session_id}/threads",
+            json={"type": "risk", "title": f"Thread {i}"},
+        ).status_code
+        for i in range(35)
+    ]
+
+    assert 200 in statuses, f"no request succeeded: {statuses[:5]}"
+    assert 429 in statuses, f"the LLM limit never triggered: {statuses}"
+    assert 500 not in statuses, f"limiter raised instead of rejecting: {statuses}"
+
+
 def test_limiter_finds_starlette_request_on_every_limited_route(client):
     """
     Every @limiter.limit handler must take a Starlette Request named `request`.
@@ -61,11 +83,20 @@ def test_limiter_finds_starlette_request_on_every_limited_route(client):
 
     from app.api import routes
 
+    # Every route is metered: LLM-calling routes, session lifecycle, and cheap
+    # reads. A new route that forgets its decorator is caught below.
     limited = [
         routes.create_session,
         routes.submit_answers,
         routes.finish_session,
+        routes.create_thread,
+        routes.list_threads,
+        routes.update_thread,
+        routes.activate_thread,
         routes.submit_thread_answers,
+        routes.submit_reflection,
+        routes.get_thread_insights,
+        routes.get_session_status,
     ]
 
     for fn in limited:
@@ -75,3 +106,21 @@ def test_limiter_finds_starlette_request_on_every_limited_route(client):
             f"{fn.__name__}'s `request` is {params['request'].annotation}, "
             "but slowapi requires a starlette Request"
         )
+
+
+def test_every_api_route_is_metered(client):
+    """No handler may be left without a limit."""
+    from app.api.rate_limit import limiter
+    from app.api.routes import router
+
+    # slowapi records decorated handlers under "<module>.<function name>".
+    def slowapi_key(route):
+        endpoint = route.endpoint
+        return f"{endpoint.__module__}.{endpoint.__name__}"
+
+    unmetered = [
+        route.endpoint.__name__ for route in router.routes
+        if slowapi_key(route) not in limiter._route_limits
+    ]
+
+    assert not unmetered, f"routes without a rate limit: {unmetered}"

@@ -20,6 +20,7 @@ from app.models.schema import (
 )
 from app.services.vultr_client import VultrClient
 from app.services.model_registry import ModelRegistry
+from app.services.intelligent_bundle_generator import IntelligentBundleGenerator
 from app.prompts.templates import (
     PLAN_SYNTHESIS_SYSTEM,
     format_synthesis_prompt
@@ -267,6 +268,11 @@ class PlanSynthesizer:
         """
         Generate execution bundle with repo scaffold, tasks, and prompts (v0.2).
 
+        Prefers IntelligentBundleGenerator, which asks the models for output
+        tailored to this specific plan. Falls back to the built-in templates
+        when generation fails, so finishing a session never breaks on a bad
+        model response.
+
         Args:
             plan_state: Final plan state
             project_profile: Project profile
@@ -274,19 +280,20 @@ class PlanSynthesizer:
         Returns:
             Execution bundle
         """
-        # Generate repo scaffold
+        try:
+            return IntelligentBundleGenerator(self.client, self.registry).generate_bundle(
+                plan_state=plan_state,
+                project_profile=project_profile
+            )
+        except Exception as e:
+            logger.warning(f"Intelligent bundle generation failed ({e}); using templates")
+
+        # Template fallback
         repo_scaffold = self._generate_repo_scaffold(plan_state, project_profile)
-
-        # Generate task breakdown
-        tasks = self._generate_tasks(plan_state, project_profile)
-
-        # Generate LLM prompts
-        prompts = self._generate_llm_prompts(plan_state, repo_scaffold, project_profile)
-
         return ExecutionBundle(
             repo_scaffold=repo_scaffold,
-            tasks=tasks,
-            prompts=prompts
+            tasks=self._generate_tasks(plan_state, project_profile),
+            prompts=self._generate_llm_prompts(plan_state, repo_scaffold, project_profile)
         )
 
     def _generate_repo_scaffold(

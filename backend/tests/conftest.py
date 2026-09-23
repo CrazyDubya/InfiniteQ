@@ -68,6 +68,69 @@ def _questions(prefix="Q"):
     }
 
 
+def _bundle_scaffold():
+    """
+    A model-generated scaffold.
+
+    "celery" is the tell: the template fallback never produces it, so tests can
+    prove whether the LLM-generated bundle or the fallback was returned.
+    """
+    return {
+        "language": "py",
+        "frameworks": ["fastapi", "react", "celery"],
+        "structure": {
+            "backend/": ["app.py", "services/", "tests/"],
+            "frontend/": ["src/", "public/"],
+            "": ["README.md", ".gitignore"],
+        },
+    }
+
+
+def _bundle_tasks():
+    """A model-generated phased task breakdown."""
+    return {
+        "tasks": [
+            {
+                "id": "TASK_001",
+                "title": "Scaffold the monorepo",
+                "phase": "prototype",
+                "description": "Create backend and frontend skeletons",
+                "acceptance_criteria": ["Both apps boot locally"],
+                "estimate": "S",
+                "dependencies": [],
+            },
+            {
+                "id": "TASK_002",
+                "title": "Implement reservations",
+                "phase": "v1",
+                "description": "Book and cancel reservations",
+                "acceptance_criteria": ["Booking round-trips"],
+                "estimate": "M",
+                "dependencies": ["TASK_001"],
+            },
+        ]
+    }
+
+
+def _bundle_prompts():
+    """A model-generated coding-tool prompt."""
+    return {
+        "prompts": [
+            {
+                "id": "PROMPT_001",
+                "title": "Bootstrap the monorepo",
+                "target": "claudecode",
+                "prompt": (
+                    "Set up this project exactly as described: FastAPI backend, React "
+                    "frontend, Celery workers and Postgres. Start with the repository "
+                    "structure, then wire the health check endpoint, then implement the "
+                    "first feature end to end with tests."
+                ),
+            }
+        ]
+    }
+
+
 def _plan_state():
     """A populated plan the synthesizer can work from."""
     return {
@@ -115,6 +178,19 @@ class FakeVultrClient:
         )
         self.calls.append({"model": model, "system": system, "user": user})
 
+        # The execution-bundle generator sends a single user message, so fall
+        # back to the user prompt when there is no system prompt to dispatch on.
+        probe = system or user
+
+        if "expert software architect" in probe:
+            return _bundle_scaffold()
+
+        if "technical project manager" in probe:
+            return _bundle_tasks()
+
+        if "writing prompts for AI coding assistants" in probe:
+            return _bundle_prompts()
+
         if "normalizing a user's initial project idea" in system:
             return {
                 "normalized_summary": "A normalized description of the idea",
@@ -149,7 +225,9 @@ class FakeVultrClient:
             }
 
         # Unknown prompt: fail loudly rather than silently returning junk.
-        raise AssertionError(f"FakeVultrClient got an unrecognized system prompt: {system[:120]!r}")
+        raise AssertionError(
+            f"FakeVultrClient got an unrecognized prompt: {(system or user)[:120]!r}"
+        )
 
 
 @pytest.fixture
@@ -159,32 +237,45 @@ def fake_client():
 
 
 @pytest.fixture
-def client(fake_client):
+def make_client(fake_client, tmp_path):
     """
-    TestClient with all services wired to the fake LLM client.
+    Build a TestClient whose services are wired to the fake LLM client.
 
     app.main's lifespan would build real services and call the live API, so the
-    routes are initialized directly here and the lifespan is bypassed.
+    routes are initialized directly here and the lifespan is bypassed. Pass a
+    storage backend to exercise other backends (e.g. FileStorage, the production
+    default, which re-serializes the session on every request).
     """
-    # Rate limits are per-IP and every test shares one client address, so a
-    # full run would trip the 10/minute session limit. Disabled here to keep
-    # tests order-independent; see test_rate_limiting.py for its own coverage.
-    limiter.enabled = False
+    def _make(storage=None):
+        # Rate limits are per-IP and every test shares one client address, so a
+        # full run would trip the 10/minute session limit. Disabled here to keep
+        # tests order-independent; see test_rate_limiting.py for its own coverage.
+        limiter.enabled = False
 
-    registry = ModelRegistry(fake_client)
-    registry.discover_models()
+        registry = ModelRegistry(fake_client)
+        registry.discover_models()
 
-    session_manager = SessionManager(fake_client, registry, storage=InMemoryStorage())
-    init_routes(
-        session_manager=session_manager,
-        question_engine=QuestionEngine(fake_client, registry),
-        plan_reducer=PlanReducer(fake_client, registry),
-        plan_synthesizer=PlanSynthesizer(fake_client, registry),
-        reflection_service=ReflectionService(fake_client, registry),
-    )
+        session_manager = SessionManager(
+            fake_client, registry, storage=storage or InMemoryStorage()
+        )
+        init_routes(
+            session_manager=session_manager,
+            question_engine=QuestionEngine(fake_client, registry),
+            plan_reducer=PlanReducer(fake_client, registry),
+            plan_synthesizer=PlanSynthesizer(fake_client, registry),
+            reflection_service=ReflectionService(fake_client, registry),
+        )
 
-    # TestClient(...) as a plain object skips lifespan startup.
-    return TestClient(app)
+        # TestClient(...) as a plain object skips lifespan startup.
+        return TestClient(app)
+
+    return _make
+
+
+@pytest.fixture
+def client(make_client):
+    """The default client, backed by in-memory storage."""
+    return make_client()
 
 
 @pytest.fixture

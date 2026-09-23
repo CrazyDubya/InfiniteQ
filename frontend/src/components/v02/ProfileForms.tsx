@@ -1,14 +1,15 @@
 /**
  * Profile Forms - v0.2 Components
  *
- * Project and Persona profile input forms for session creation.
+ * Project and Persona profile input forms for session creation. Field names and
+ * options mirror backend/app/models/schema.py.
  */
 import React, { useState } from "react";
 import {
-  ProjectProfile,
   PersonaProfile,
-  ProjectType,
   PersonaRole,
+  ProjectProfile,
+  ProjectType,
 } from "../../types";
 
 interface ProfileFormsProps {
@@ -31,29 +32,23 @@ export const ProfileForms: React.FC<ProfileFormsProps> = ({
     initialProject.non_goals?.join(", ") || ""
   );
 
-  const handleProjectChange = (field: keyof ProjectProfile, value: any) => {
+  const handleProjectChange = (field: keyof ProjectProfile, value: unknown) => {
     const updated = { ...projectProfile, [field]: value };
     setProjectProfile(updated);
     onProfilesChange(updated, personaProfile);
   };
 
-  const handlePersonaChange = (field: keyof PersonaProfile, value: any) => {
+  const handlePersonaChange = (field: keyof PersonaProfile, value: unknown) => {
     const updated = { ...personaProfile, [field]: value };
     setPersonaProfile(updated);
     onProfilesChange(projectProfile, updated);
   };
 
-  const handleTechConstraintsChange = (value: string) => {
-    setTechConstraints(value);
-    const constraints = value.split(",").map((s) => s.trim()).filter(Boolean);
-    handleProjectChange("tech_constraints", constraints);
-  };
-
-  const handleNonGoalsChange = (value: string) => {
-    setNonGoals(value);
-    const goals = value.split(",").map((s) => s.trim()).filter(Boolean);
-    handleProjectChange("non_goals", goals);
-  };
+  const toList = (value: string) =>
+    value
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean);
 
   return (
     <div className="profile-forms">
@@ -64,7 +59,6 @@ export const ProfileForms: React.FC<ProfileFormsProps> = ({
         </p>
 
         <div className="form-grid">
-          {/* Project Type */}
           <div className="form-field">
             <label>Project Type</label>
             <select
@@ -72,18 +66,15 @@ export const ProfileForms: React.FC<ProfileFormsProps> = ({
               onChange={(e) => handleProjectChange("type", e.target.value as ProjectType)}
             >
               <option value={ProjectType.SAAS}>SaaS Platform</option>
-              <option value={ProjectType.MOBILE_APP}>Mobile App</option>
-              <option value={ProjectType.WEB_APP}>Web Application</option>
-              <option value={ProjectType.ENTERPRISE}>Enterprise Software</option>
-              <option value={ProjectType.ECOMMERCE}>E-Commerce</option>
-              <option value={ProjectType.ANALYTICS}>Analytics/Data</option>
-              <option value={ProjectType.DEV_TOOLS}>Developer Tools</option>
-              <option value={ProjectType.CONTENT}>Content Platform</option>
+              <option value={ProjectType.INTERNAL_TOOL}>Internal Tool</option>
+              <option value={ProjectType.GAME}>Game</option>
+              <option value={ProjectType.CONTENT_SITE}>Content Site</option>
+              <option value={ProjectType.RESEARCH}>Research</option>
+              <option value={ProjectType.AUTOMATION}>Automation</option>
               <option value={ProjectType.OTHER}>Other</option>
             </select>
           </div>
 
-          {/* Sophistication */}
           <div className="form-field">
             <label>Sophistication Level</label>
             <select
@@ -96,7 +87,6 @@ export const ProfileForms: React.FC<ProfileFormsProps> = ({
             </select>
           </div>
 
-          {/* Team Size */}
           <div className="form-field">
             <label>Team Size</label>
             <select
@@ -110,7 +100,6 @@ export const ProfileForms: React.FC<ProfileFormsProps> = ({
             </select>
           </div>
 
-          {/* Timeline */}
           <div className="form-field">
             <label>Timeline</label>
             <select
@@ -124,7 +113,6 @@ export const ProfileForms: React.FC<ProfileFormsProps> = ({
             </select>
           </div>
 
-          {/* Budget */}
           <div className="form-field">
             <label>Budget Band</label>
             <select
@@ -139,32 +127,35 @@ export const ProfileForms: React.FC<ProfileFormsProps> = ({
           </div>
         </div>
 
-        {/* Tech Constraints */}
         <div className="form-field full-width">
           <label>Tech Constraints (comma-separated)</label>
           <input
             type="text"
             placeholder="e.g., python, react, no PHP, no Java"
             value={techConstraints}
-            onChange={(e) => handleTechConstraintsChange(e.target.value)}
+            onChange={(e) => {
+              setTechConstraints(e.target.value);
+              handleProjectChange("tech_constraints", toList(e.target.value));
+            }}
           />
           <span className="help-text">
-            List required tech OR forbidden tech (prefix with "no")
+            Required or forbidden technologies. The interview will not propose
+            questions about forbidden ones.
           </span>
         </div>
 
-        {/* Non-Goals */}
         <div className="form-field full-width">
           <label>Non-Goals (comma-separated)</label>
           <input
             type="text"
             placeholder="e.g., mobile apps, blockchain, realtime chat"
             value={nonGoals}
-            onChange={(e) => handleNonGoalsChange(e.target.value)}
+            onChange={(e) => {
+              setNonGoals(e.target.value);
+              handleProjectChange("non_goals", toList(e.target.value));
+            }}
           />
-          <span className="help-text">
-            Explicitly out-of-scope features to avoid
-          </span>
+          <span className="help-text">Explicitly out-of-scope features to avoid</span>
         </div>
       </div>
 
@@ -175,71 +166,57 @@ export const ProfileForms: React.FC<ProfileFormsProps> = ({
         </p>
 
         <div className="form-grid">
-          {/* Role */}
           <div className="form-field">
             <label>Your Role</label>
             <select
-              value={personaProfile.role || PersonaRole.FOUNDER_SOLO}
+              value={personaProfile.role || PersonaRole.FOUNDER_TECHNICAL}
               onChange={(e) => handlePersonaChange("role", e.target.value as PersonaRole)}
             >
-              <option value={PersonaRole.FOUNDER_SOLO}>Solo Founder</option>
-              <option value={PersonaRole.FOUNDER_TEAM}>Founding Team</option>
+              <option value={PersonaRole.FOUNDER_NON_TECHNICAL}>
+                Non-technical Founder
+              </option>
+              <option value={PersonaRole.FOUNDER_TECHNICAL}>Technical Founder</option>
               <option value={PersonaRole.TECH_LEAD}>Tech Lead</option>
-              <option value={PersonaRole.PRODUCT_MANAGER}>Product Manager</option>
-              <option value={PersonaRole.BUSINESS_LEADER}>Business Leader</option>
-              <option value={PersonaRole.ENGINEER}>Engineer</option>
-              <option value={PersonaRole.DESIGNER}>Designer</option>
-              <option value={PersonaRole.OTHER}>Other</option>
+              <option value={PersonaRole.PM}>Product Manager</option>
+              <option value={PersonaRole.DOMAIN_EXPERT}>Domain Expert</option>
+              <option value={PersonaRole.HACKER_PLAYING}>Hacker / Side Project</option>
             </select>
           </div>
 
-          {/* Tech Comfort */}
           <div className="form-field">
-            <label>
-              Technical Comfort: {personaProfile.tech_comfort || 5}/10
-            </label>
-            <input
-              type="range"
-              min="1"
-              max="10"
-              value={personaProfile.tech_comfort || 5}
-              onChange={(e) => handlePersonaChange("tech_comfort", parseInt(e.target.value))}
-              className="slider"
-            />
-            <span className="slider-labels">
-              <span>Non-technical</span>
-              <span>Expert</span>
-            </span>
+            <label>Comfort with Tech</label>
+            <select
+              value={personaProfile.comfort_with_tech || "medium"}
+              onChange={(e) => handlePersonaChange("comfort_with_tech", e.target.value)}
+            >
+              <option value="low">Low - keep it non-technical</option>
+              <option value="medium">Medium - some jargon is fine</option>
+              <option value="high">High - technical detail welcome</option>
+            </select>
           </div>
 
-          {/* Business Comfort */}
           <div className="form-field">
-            <label>
-              Business Comfort: {personaProfile.business_comfort || 5}/10
-            </label>
-            <input
-              type="range"
-              min="1"
-              max="10"
-              value={personaProfile.business_comfort || 5}
-              onChange={(e) => handlePersonaChange("business_comfort", parseInt(e.target.value))}
-              className="slider"
-            />
-            <span className="slider-labels">
-              <span>New to business</span>
-              <span>Experienced</span>
-            </span>
+            <label>Comfort with Business</label>
+            <select
+              value={personaProfile.comfort_with_business || "medium"}
+              onChange={(e) =>
+                handlePersonaChange("comfort_with_business", e.target.value)
+              }
+            >
+              <option value="low">Low - avoid business jargon</option>
+              <option value="medium">Medium</option>
+              <option value="high">High - happy to discuss GTM and pricing</option>
+            </select>
           </div>
 
-          {/* Preferred Depth */}
           <div className="form-field">
             <label>Question Depth</label>
             <select
-              value={personaProfile.preferred_depth || "medium"}
+              value={personaProfile.preferred_depth || "balanced"}
               onChange={(e) => handlePersonaChange("preferred_depth", e.target.value)}
             >
               <option value="light">Light (high-level overview)</option>
-              <option value="medium">Medium (balanced detail)</option>
+              <option value="balanced">Balanced (recommended)</option>
               <option value="deep">Deep (comprehensive exploration)</option>
             </select>
           </div>
@@ -251,6 +228,7 @@ export const ProfileForms: React.FC<ProfileFormsProps> = ({
           display: flex;
           flex-direction: column;
           gap: 2rem;
+          text-align: left;
         }
 
         .profile-section {
@@ -264,7 +242,7 @@ export const ProfileForms: React.FC<ProfileFormsProps> = ({
           color: #2c3e50;
         }
 
-        .help-text {
+        .profile-forms .help-text {
           color: #6c757d;
           font-size: 0.9rem;
           margin: 0 0 1rem 0;
@@ -272,7 +250,7 @@ export const ProfileForms: React.FC<ProfileFormsProps> = ({
 
         .form-grid {
           display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+          grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
           gap: 1rem;
           margin-top: 1rem;
         }
@@ -280,6 +258,7 @@ export const ProfileForms: React.FC<ProfileFormsProps> = ({
         .form-field {
           display: flex;
           flex-direction: column;
+          margin-bottom: 0.5rem;
         }
 
         .form-field.full-width {
@@ -298,6 +277,7 @@ export const ProfileForms: React.FC<ProfileFormsProps> = ({
           border: 1px solid #ced4da;
           border-radius: 4px;
           font-size: 1rem;
+          background: #ffffff;
         }
 
         .form-field select:focus,
@@ -306,16 +286,9 @@ export const ProfileForms: React.FC<ProfileFormsProps> = ({
           border-color: #007bff;
         }
 
-        .slider {
-          width: 100%;
-        }
-
-        .slider-labels {
-          display: flex;
-          justify-content: space-between;
-          font-size: 0.8rem;
-          color: #6c757d;
+        .profile-forms .help-text {
           margin-top: 0.25rem;
+          margin-bottom: 0;
         }
       `}</style>
     </div>

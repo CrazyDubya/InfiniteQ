@@ -40,6 +40,53 @@ body {
   padding: 2rem;
 }
 
+/* Interview layout: threads & reflections beside the question set */
+.interview-layout {
+  display: grid;
+  grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
+  gap: 2rem;
+  align-items: start;
+  max-width: 1500px;
+  margin: 0 auto;
+}
+
+.interview-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  position: sticky;
+  top: 2rem;
+}
+
+.interview-main {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  min-width: 0;
+}
+
+.interview-main .interview-session {
+  margin: 0;
+}
+
+.final-layout {
+  display: flex;
+  flex-direction: column;
+  gap: 2rem;
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+@media (max-width: 900px) {
+  .interview-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .interview-sidebar {
+    position: static;
+  }
+}
+
 /* Error Banner */
 .error-banner {
   position: fixed;
@@ -134,6 +181,53 @@ body {
 }
 
 button[type="submit"],
+.toggle-profiles-button {
+  display: block;
+  width: 100%;
+  margin-bottom: 1.5rem;
+  background: transparent;
+  border: 1px dashed var(--gray-400, #ced4da);
+  color: var(--gray-700, #495057);
+  padding: 0.75rem 1rem;
+  border-radius: 0.5rem;
+  cursor: pointer;
+  font-size: 0.95rem;
+}
+
+.toggle-profiles-button:hover:not(:disabled) {
+  border-color: var(--primary, #007bff);
+  color: var(--primary, #007bff);
+}
+
+.finish-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 1rem;
+}
+
+.finish-option {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.9rem;
+  color: var(--gray-700, #495057);
+}
+
+.finish-option select {
+  padding: 0.4rem 0.5rem;
+  border: 1px solid var(--gray-300, #ced4da);
+  border-radius: 0.375rem;
+  background: white;
+}
+
+.finish-option.checkbox input {
+  width: 1rem;
+  height: 1rem;
+}
+
 .continue-button,
 .finish-button,
 .copy-button,

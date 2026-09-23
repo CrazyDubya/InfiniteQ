@@ -5,9 +5,11 @@ Version 0.3: Adds pluggable storage backends (in-memory or Redis).
 """
 import uuid
 import logging
-import random
+import threading
 from datetime import datetime
-from typing import Optional, List
+from functools import wraps
+from contextlib import contextmanager
+from typing import Optional, List, Dict
 from app.models.schema import (
     SessionData,
     IdeaBrief,
@@ -35,6 +37,52 @@ from app.prompts.templates import (
 logger = logging.getLogger(__name__)
 
 
+def _synchronized(method):
+    """
+    Serialize a mutating SessionManager method on the session it targets.
+
+    Every mutator is a read-modify-write cycle (load, mutate, save). Without
+    this, two requests touching the same session can interleave and one of them
+    silently loses its update. The lock is reentrant so a locked method may
+    call another one.
+
+    Note: this serializes requests within one process. Running several server
+    processes against the same file/Redis store would need an external lock.
+    """
+    @wraps(method)
+    def wrapper(self, session_id, *args, **kwargs):
+        with self._lock_for(session_id):
+            return method(self, session_id, *args, **kwargs)
+
+    return wrapper
+
+
+def aggregate_global_coverage(threads: Dict[str, ThreadState]) -> CoverageMap:
+    """
+    Aggregate per-thread coverage into the session-level (global) map.
+
+    Each dimension takes the highest score reached by any thread. Coverage is a
+    "how well is this dimension understood" score and each thread is a focused
+    exploration of one area, so per dimension the best thread wins rather than
+    the average: creating another (still empty) thread must never lower global
+    coverage, and answering a question can only raise it.
+
+    Args:
+        threads: Thread states keyed by thread id (all of them, active or parked)
+
+    Returns:
+        Global coverage map
+    """
+    aggregated = {field: 0.0 for field in CoverageMap.model_fields}
+
+    for thread in threads.values():
+        for field, score in thread.coverage.model_dump().items():
+            if score > aggregated[field]:
+                aggregated[field] = score
+
+    return CoverageMap(**aggregated)
+
+
 class SessionManager:
     """
     Manages interview sessions (v0.2: with threads and profiles).
@@ -59,6 +107,36 @@ class SessionManager:
         self.client = vultr_client
         self.registry = model_registry
         self.storage = storage or create_storage()
+        # One reentrant lock per session, guarding the read-modify-write cycle
+        # of every mutation below.
+        self._session_locks: Dict[str, threading.RLock] = {}
+        self._session_locks_guard = threading.Lock()
+
+    def _lock_for(self, session_id: str) -> threading.RLock:
+        """Get (or create) the mutation lock for a session."""
+        with self._session_locks_guard:
+            lock = self._session_locks.get(session_id)
+            if lock is None:
+                lock = threading.RLock()
+                self._session_locks[session_id] = lock
+            return lock
+
+    @contextmanager
+    def answer_round(self, session_id: str):
+        """
+        Serialize a complete answer round for one session.
+
+        Answer handling is a transaction larger than any single mutator: it
+        reads the pending question set, reduces plan/coverage state, persists
+        the answers, generates the next round, and replaces pending questions.
+        Holding the same reentrant per-session lock across that whole sequence
+        prevents two requests from computing from the same stale snapshot.
+
+        This lock is process-local. Multi-worker deployments still require an
+        external/distributed session lock.
+        """
+        with self._lock_for(session_id):
+            yield
 
     def create_session(
         self,
@@ -119,6 +197,10 @@ class SessionManager:
             session.threads[initial_thread.id] = initial_thread
             session.active_thread_id = initial_thread.id
 
+            # Global coverage is derived from the threads, so keep the
+            # invariant true from the start.
+            session.coverage = aggregate_global_coverage(session.threads)
+
             # Store session
             self.storage.save(session_id, session)
 
@@ -171,6 +253,7 @@ class SessionManager:
             last_updated=timestamp
         )
 
+    @_synchronized
     def create_thread(
         self,
         session_id: str,
@@ -244,6 +327,7 @@ class SessionManager:
             return None
         return session.threads.get(thread_id)
 
+    @_synchronized
     def set_active_thread(self, session_id: str, thread_id: str) -> SessionData:
         """
         Set the active thread for a session.
@@ -271,6 +355,7 @@ class SessionManager:
         logger.info(f"Set active thread to {thread_id} in session {session_id}")
         return session
 
+    @_synchronized
     def update_thread(
         self,
         session_id: str,
@@ -311,6 +396,7 @@ class SessionManager:
         logger.info(f"Updated thread {thread_id}")
         return thread
 
+    @_synchronized
     def update_session(
         self,
         session_id: str,
@@ -360,21 +446,33 @@ class SessionManager:
         logger.info(f"Updated session {session_id}")
         return session
 
+    @_synchronized
     def update_thread_after_answers(
         self,
         session_id: str,
         thread_id: str,
         questions: List[Question],
-        answers: List[Answer]
+        answers: List[Answer],
+        plan_state: Optional[PlanState] = None,
+        coverage: Optional[CoverageMap] = None
     ) -> ThreadState:
         """
-        Update thread after answering questions (v0.2).
+        Record answers for a thread and persist everything they produced (v0.2).
+
+        This is the single write path for answering questions inside a thread:
+        it stores the new Q&A pairs, saves the updated plan state and thread
+        coverage, and recomputes global coverage from every thread. All of it is
+        persisted so the next request builds on it instead of restarting from
+        zero.
 
         Args:
             session_id: Session identifier
             thread_id: Thread identifier
-            questions: Questions that were asked
+            questions: Questions that were presented for answering (all of them
+                count as asked, whether or not the caller answered each one)
             answers: User's answers
+            plan_state: Plan state updated from these answers (optional)
+            coverage: Thread coverage updated from these answers (optional)
 
         Returns:
             Updated thread
@@ -387,47 +485,53 @@ class SessionManager:
         if not thread:
             raise ValueError(f"Thread {thread_id} not found")
 
-        # Add Q&A to thread history
+        # Add Q&A to the thread's own history, and to the session's bounded
+        # recent-activity log (what /status and the legacy answer endpoint read).
         question_map = {q.id: q for q in questions}
         for answer in answers:
             question = question_map.get(answer.question_id)
             if question:
-                thread.qa_history.append(QAPair(
-                    question=question,
-                    answer=answer
-                ))
+                pair = QAPair(question=question, answer=answer)
+                thread.qa_history.append(pair)
+                session.qa_history.append(pair)
+
+        # Persist the state these answers produced, so the next round (and the
+        # final synthesis) sees it.
+        if plan_state is not None:
+            session.plan_state = plan_state
+        if coverage is not None:
+            thread.coverage = coverage
+
+        timestamp = datetime.utcnow().isoformat()
 
         # Update counters
         thread.questions_asked += len(questions)
         thread.questions_since_reflection += len(questions)
-        thread.last_updated = datetime.utcnow().isoformat()
+        thread.last_updated = timestamp
 
-        # Keep thread history manageable (last 30 pairs)
+        # Keep histories manageable (last 30 pairs per thread, 20 per session)
         if len(thread.qa_history) > 30:
             thread.qa_history = thread.qa_history[-30:]
+        if len(session.qa_history) > 20:
+            session.qa_history = session.qa_history[-20:]
+
+        # Global coverage is derived from every thread, so work done in one
+        # thread is not discarded when another one answers.
+        session.coverage = aggregate_global_coverage(session.threads)
+        session.updated_at = timestamp
 
         # Persist changes
         self.storage.save(session_id, session)
 
+        logger.info(f"Recorded {len(answers)} answers on thread {thread_id} "
+                    f"(coverage: {thread.coverage.model_dump()})")
+
         return thread
 
-    def should_inject_reflection(self, thread: ThreadState) -> bool:
-        """
-        Determine if it's time for a reflection pulse.
+    # NOTE: reflection scheduling lives in ReflectionService (which owns the
+    # trigger policy) - there is deliberately no second copy here.
 
-        Args:
-            thread: Thread state
-
-        Returns:
-            True if reflection should be injected
-        """
-        if thread.questions_since_reflection < 5:
-            return False
-
-        # Random threshold between 5-10 questions
-        threshold = random.randint(5, 10)
-        return thread.questions_since_reflection >= threshold
-
+    @_synchronized
     def add_plan_note(
         self,
         session_id: str,
@@ -476,6 +580,7 @@ class SessionManager:
         logger.info(f"Added plan note to thread {thread_id}")
         return note
 
+    @_synchronized
     def complete_session(self, session_id: str) -> SessionData:
         """
         Mark session as completed.
@@ -498,6 +603,7 @@ class SessionManager:
         logger.info(f"Completed session {session_id}")
         return session
 
+    @_synchronized
     def store_pending_questions(
         self,
         session_id: str,
@@ -560,6 +666,7 @@ class SessionManager:
             # Legacy session-level storage
             return session.pending_questions
 
+    @_synchronized
     def clear_pending_questions(
         self,
         session_id: str,
@@ -676,5 +783,7 @@ class SessionManager:
         """
         deleted = self.storage.delete(session_id)
         if deleted:
+            with self._session_locks_guard:
+                self._session_locks.pop(session_id, None)
             logger.info(f"Deleted session {session_id}")
         return deleted

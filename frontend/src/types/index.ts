@@ -1,5 +1,9 @@
 /**
- * Frontend types (mirrors backend schema)
+ * Frontend types.
+ *
+ * These mirror the backend Pydantic schema in backend/app/models/schema.py -
+ * keep the enum values identical, otherwise the API rejects the request with a
+ * 422.
  */
 
 export enum CoverageKey {
@@ -26,6 +30,21 @@ export interface CoverageMap {
   gtm: number;
 }
 
+/** Coverage per lifecycle phase. */
+export interface PhaseCoverageMap {
+  prototype: CoverageMap;
+  v1: CoverageMap;
+  scale_up: CoverageMap;
+  v2_plus: CoverageMap;
+}
+
+export enum Phase {
+  PROTOTYPE = "prototype",
+  V1 = "v1",
+  SCALE_UP = "scale_up",
+  V2_PLUS = "v2_plus",
+}
+
 export interface QuestionOption {
   id: string;
   text: string;
@@ -35,7 +54,9 @@ export interface QuestionOption {
 export interface Question {
   id: string;
   coverage_key: CoverageKey;
+  phase?: Phase | null;
   priority: number;
+  kind?: "multiple_choice" | "reflection";
   text: string;
   options: QuestionOption[];
 }
@@ -44,6 +65,59 @@ export interface Answer {
   question_id: string;
   choice_id: string;
   free_text?: string;
+}
+
+// ============================================================================
+// Profiles
+// ============================================================================
+
+export enum ProjectType {
+  SAAS = "saas",
+  INTERNAL_TOOL = "internal_tool",
+  GAME = "game",
+  CONTENT_SITE = "content_site",
+  RESEARCH = "research",
+  AUTOMATION = "automation",
+  OTHER = "other",
+}
+
+export enum PersonaRole {
+  FOUNDER_NON_TECHNICAL = "founder_non_technical",
+  FOUNDER_TECHNICAL = "founder_technical",
+  TECH_LEAD = "tech_lead",
+  PM = "pm",
+  DOMAIN_EXPERT = "domain_expert",
+  HACKER_PLAYING = "hacker_playing",
+}
+
+export type ComfortLevel = "low" | "medium" | "high";
+export type PreferredDepth = "light" | "balanced" | "deep";
+
+export interface ProjectProfile {
+  type?: ProjectType;
+  sophistication?: "toy" | "mvp" | "production";
+  team_size?: "solo" | "2-3" | "4-10" | "10+";
+  tech_constraints?: string[];
+  timeline?: "weekend" | "1-4_weeks" | "1-3_months" | "6+_months";
+  budget_band?: "<1k" | "1k-10k" | "10k-100k" | "100k+";
+  non_goals?: string[];
+}
+
+export interface PersonaProfile {
+  role?: PersonaRole;
+  comfort_with_tech?: ComfortLevel;
+  comfort_with_business?: ComfortLevel;
+  preferred_depth?: PreferredDepth;
+}
+
+// ============================================================================
+// Sessions
+// ============================================================================
+
+export enum Mode {
+  KICKOFF = "kickoff",
+  DEEP_DIVE = "deep_dive",
+  SANITY_CHECK = "sanity_check",
 }
 
 export interface CreateSessionRequest {
@@ -69,41 +143,34 @@ export interface AnswerRequest {
 export interface AnswerResponse {
   next_questions: Question[];
   coverage: CoverageMap;
-  plan_preview?: any;
+  plan_preview?: unknown;
 }
 
-export interface FinishResponse {
-  json_plan: any;
-  markdown_brief: string;
-  execution_bundle?: ExecutionBundle;
+export interface SessionStatus {
+  session_id: string;
+  mode: Mode;
+  created_at: string;
+  updated_at: string;
+  completed: boolean;
+  qa_count: number;
+  coverage: CoverageMap;
+  project_profile: ProjectProfile;
+  persona_profile: PersonaProfile;
+  active_thread_id: string | null;
+  thread_count: number;
+  threads: {
+    id: string;
+    title: string;
+    type: ThreadType;
+    questions_asked: number;
+    active: boolean;
+    coverage_avg: number;
+  }[];
 }
 
 // ============================================================================
-// v0.2 Types
+// Threads & reflections
 // ============================================================================
-
-export enum ProjectType {
-  SAAS = "saas",
-  MOBILE_APP = "mobile_app",
-  WEB_APP = "web_app",
-  ENTERPRISE = "enterprise",
-  ECOMMERCE = "ecommerce",
-  ANALYTICS = "analytics",
-  DEV_TOOLS = "dev_tools",
-  CONTENT = "content",
-  OTHER = "other",
-}
-
-export enum PersonaRole {
-  FOUNDER_SOLO = "founder_solo",
-  FOUNDER_TEAM = "founder_team",
-  TECH_LEAD = "tech_lead",
-  PRODUCT_MANAGER = "product_manager",
-  BUSINESS_LEADER = "business_leader",
-  ENGINEER = "engineer",
-  DESIGNER = "designer",
-  OTHER = "other",
-}
 
 export enum ThreadType {
   KICKOFF = "kickoff",
@@ -115,43 +182,6 @@ export enum ThreadType {
   GTM = "gtm",
   SANITY_CHECK = "sanity_check",
   CUSTOM = "custom",
-}
-
-export enum Mode {
-  KICKOFF = "kickoff",
-  DEEP_DIVE = "deep_dive",
-  SANITY_CHECK = "sanity_check",
-}
-
-export enum ViewProfile {
-  BUILDER = "builder",
-  STAKEHOLDER = "stakeholder",
-  INVESTOR = "investor",
-  AGENT_SPEC = "agent_spec",
-}
-
-export enum Phase {
-  PROTOTYPE = "prototype",
-  V1 = "v1",
-  SCALE_UP = "scale_up",
-  V2_PLUS = "v2_plus",
-}
-
-export interface ProjectProfile {
-  type?: ProjectType;
-  sophistication?: "toy" | "mvp" | "production";
-  team_size?: "solo" | "2-3" | "4-10" | "10+";
-  tech_constraints?: string[];
-  timeline?: "weekend" | "1-4_weeks" | "1-3_months" | "6+_months";
-  budget_band?: "<1k" | "1k-10k" | "10k-100k" | "100k+";
-  non_goals?: string[];
-}
-
-export interface PersonaProfile {
-  role?: PersonaRole;
-  tech_comfort?: number; // 1-10
-  business_comfort?: number; // 1-10
-  preferred_depth?: "light" | "medium" | "deep";
 }
 
 export interface PlanNote {
@@ -168,24 +198,16 @@ export interface ThreadState {
   session_id: string;
   type: ThreadType;
   title: string;
-  questions_asked: number;
-  notes: PlanNote[];
-}
-
-export interface CreateSessionRequestV2 {
-  idea: string;
-  mode?: Mode;
-  project_profile?: ProjectProfile;
-  persona_profile?: PersonaProfile;
-}
-
-export interface CreateSessionResponseV2 {
-  session_id: string;
-  thread_id: string;
-  first_questions: Question[];
+  root_prompt: string;
   coverage: CoverageMap;
-  project_profile: ProjectProfile;
-  persona_profile: PersonaProfile;
+  phase_coverage: PhaseCoverageMap;
+  questions_asked: number;
+  questions_since_reflection: number;
+  notes: PlanNote[];
+  pending_questions: Question[];
+  active: boolean;
+  created_at: string;
+  last_updated: string;
 }
 
 export interface CreateThreadRequest {
@@ -201,20 +223,55 @@ export interface CreateThreadResponse {
 
 export interface ListThreadsResponse {
   threads: ThreadState[];
-  active_thread_id: string;
+  active_thread_id: string | null;
+}
+
+export interface UpdateThreadRequest {
+  title?: string;
+  active?: boolean;
+}
+
+export interface ThreadAnswerResponse {
+  next_questions: Question[];
+  thread_coverage: CoverageMap;
+  phase_coverage: PhaseCoverageMap;
+  global_coverage: CoverageMap;
+  reflection_prompt?: Question | null;
 }
 
 export interface SubmitReflectionRequest {
-  reflection: string;
+  text: string;
 }
 
 export interface SubmitReflectionResponse {
   note: PlanNote;
+  message: string;
 }
 
-export interface FinishRequestV2 {
-  view_profile: ViewProfile;
-  include_execution_bundle: boolean;
+export interface ThreadInsightsResponse {
+  thread_id: string;
+  note_count: number;
+  insights: string;
+  notes: PlanNote[];
+}
+
+// ============================================================================
+// Final plan & execution bundles
+// ============================================================================
+
+export enum ViewProfile {
+  BUILDER = "builder",
+  STAKEHOLDER = "stakeholder",
+  INVESTOR = "investor",
+  AGENT_SPEC = "agent_spec",
+}
+
+export interface PlanChunk {
+  id: string;
+  type: "assumption" | "feature" | "risk" | "constraint" | "note" | "phase_plan";
+  content: string;
+  visibility: string;
+  parked: boolean;
 }
 
 export interface RepoScaffold {
@@ -229,14 +286,14 @@ export interface Task {
   phase: Phase;
   description: string;
   acceptance_criteria: string[];
-  estimate: "S" | "M" | "L" | "XL";
+  estimate: "S" | "M" | "L";
   dependencies: string[];
 }
 
 export interface LLMPromptTemplate {
   id: string;
   title: string;
-  target: string;
+  target: "cursor" | "claudecode" | "windsurf" | "generic";
   prompt: string;
 }
 
@@ -244,4 +301,16 @@ export interface ExecutionBundle {
   repo_scaffold: RepoScaffold;
   tasks: Task[];
   prompts: LLMPromptTemplate[];
+}
+
+export interface FinishRequest {
+  view_profile: ViewProfile;
+  include_execution_bundle: boolean;
+}
+
+export interface FinishResponse {
+  json_plan: unknown;
+  markdown_brief: string;
+  execution_bundle?: ExecutionBundle | null;
+  plan_chunks?: PlanChunk[];
 }

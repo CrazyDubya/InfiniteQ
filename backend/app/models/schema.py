@@ -340,9 +340,13 @@ class SessionData(BaseModel):
     session_id: str
     idea_brief: IdeaBrief
     plan_state: PlanState = Field(default_factory=PlanState)
-    coverage: CoverageMap = Field(default_factory=CoverageMap)  # Global coverage across all threads
-    qa_history: List[QAPair] = Field(default_factory=list)  # Legacy; threads have their own history
-    pending_questions: List["Question"] = Field(default_factory=list)  # Legacy: current questions awaiting answers
+    coverage: CoverageMap = Field(default_factory=CoverageMap)  # Global coverage aggregated from all threads
+    # Bounded recent-activity log shared by all threads; threads keep their own
+    # full history. Read by /status and the legacy session-level answer endpoint.
+    qa_history: List[QAPair] = Field(default_factory=list)
+    # Questions awaiting answers, for sessions with no active thread (v0.1 flow).
+    # With threads, pending questions live on the thread instead.
+    pending_questions: List["Question"] = Field(default_factory=list)
 
     # v0.2 additions
     project_profile: ProjectProfile = Field(default_factory=ProjectProfile)

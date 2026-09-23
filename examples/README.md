@@ -151,13 +151,13 @@ finish_session(
 session = create_session(
     idea="Enterprise platform",
     project_profile={
-        "type": "enterprise",
+        "type": "internal_tool",
         "team_size": "10+",
         "budget_band": "100k+"
     },
     persona_profile={
-        "role": "business_leader",
-        "tech_comfort": 3,
+        "role": "founder_non_technical",
+        "comfort_with_tech": "low",
         "preferred_depth": "light"
     }
 )
@@ -172,9 +172,11 @@ finish_session(view_profile="stakeholder")
 
 ### Core Flow
 
+All endpoints live under `/api/v1`.
+
 ```python
 # 1. Create session
-POST /session
+POST /api/v1/session
 {
   "idea": "Your project idea",
   "mode": "kickoff",  # or "deep_dive", "sanity_check"
@@ -183,26 +185,26 @@ POST /session
 }
 
 # 2. Create threads
-POST /session/{id}/threads
+POST /api/v1/session/{id}/threads
 {
   "type": "architecture",  # or product_ux, risk, gtm, etc.
   "title": "Thread title"
 }
 
 # 3. Answer questions
-POST /session/{id}/threads/{tid}/answer
+POST /api/v1/session/{id}/threads/{tid}/answer
 {
   "answers": [...]
 }
 
 # 4. Submit reflections
-POST /session/{id}/threads/{tid}/reflect
+POST /api/v1/session/{id}/threads/{tid}/reflect
 {
-  "reflection": "Your freeform insights"
+  "text": "Your freeform insights"
 }
 
 # 5. Finish
-POST /session/{id}/finish
+POST /api/v1/session/{id}/finish
 {
   "view_profile": "builder",  # or stakeholder, investor, agent_spec
   "include_execution_bundle": true
@@ -221,9 +223,9 @@ POST /session/{id}/finish
 - Specify non_goals to keep scope tight
 
 **Persona Profile:**
-- Set tech_comfort honestly (1-10)
-- Choose preferred_depth based on time available
-- Select role that matches your position
+- Set comfort_with_tech / comfort_with_business honestly (low, medium, high)
+- Choose preferred_depth based on time available (light, balanced, deep)
+- Select the role that matches your position
 
 ### 2. Thread Strategy
 

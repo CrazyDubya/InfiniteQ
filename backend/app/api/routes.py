@@ -2,11 +2,14 @@
 FastAPI routes for the InfiniteQ planning harness.
 Version 0.2: Adds thread management endpoints.
 """
-import os
 import logging
-from fastapi import APIRouter, HTTPException, Depends, Request
-from slowapi import Limiter
-from slowapi.util import get_remote_address
+from fastapi import APIRouter, HTTPException, Request
+from app.api.rate_limit import (
+    limiter,
+    RATE_LIMIT_LLM,
+    RATE_LIMIT_READ,
+    RATE_LIMIT_SESSION,
+)
 from app.models.schema import (
     CreateSessionRequest,
     CreateSessionResponse,
@@ -31,11 +34,6 @@ from app.services.plan_synthesizer import PlanSynthesizer
 from app.services.reflection_service import ReflectionService
 
 logger = logging.getLogger(__name__)
-
-# Rate limiting configuration
-RATE_LIMIT_SESSION = os.environ.get("RATE_LIMIT_SESSION", "10/minute")
-RATE_LIMIT_LLM = os.environ.get("RATE_LIMIT_LLM", "30/minute")
-limiter = Limiter(key_func=get_remote_address)
 
 router = APIRouter()
 
@@ -62,6 +60,24 @@ def init_routes(
     _plan_reducer = plan_reducer
     _plan_synthesizer = plan_synthesizer
     _reflection_service = reflection_service
+
+
+def _validate_pending_answers(questions, answers) -> None:
+    """Reject answers that target a question set that is no longer current."""
+    pending_ids = {question.id for question in questions}
+    stale_ids = sorted({
+        answer.question_id
+        for answer in answers
+        if answer.question_id not in pending_ids
+    })
+    if stale_ids:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Answers no longer match the current pending questions. "
+                "Refresh the session and submit the current round."
+            ),
+        )
 
 
 def _filter_plan_chunks_by_view(chunks: list, view_profile) -> list:
@@ -167,7 +183,13 @@ async def create_session(request: Request, payload: CreateSessionRequest):
 @limiter.limit(RATE_LIMIT_LLM)
 async def submit_answers(session_id: str, request: Request, payload: AnswerRequest):
     """
-    Submit answers and get next questions.
+    Submit answers and get next questions (v0.2: thread-aware).
+
+    This is the endpoint the single-thread UI uses. Questions awaiting answers
+    live on the session's active thread, so the answers are resolved and
+    persisted through the same path as
+    POST /session/{id}/threads/{thread_id}/answer. Sessions created before
+    threads existed keep their pending questions at session scope and still work.
 
     Args:
         session_id: Session identifier
@@ -178,64 +200,111 @@ async def submit_answers(session_id: str, request: Request, payload: AnswerReque
         Next questions and updated coverage
     """
     try:
-        # Get session
-        session = _session_manager.get_session(session_id)
-        if not session:
-            raise HTTPException(status_code=404, detail="Session not found")
+        with _session_manager.answer_round(session_id):
+            # Get session
+            session = _session_manager.get_session(session_id)
+            if not session:
+                raise HTTPException(status_code=404, detail="Session not found")
 
-        if session.completed:
-            raise HTTPException(status_code=400, detail="Session already completed")
+            if session.completed:
+                raise HTTPException(status_code=400, detail="Session already completed")
 
-        # Retrieve pending questions from storage
-        questions = _session_manager.get_pending_questions(session_id, thread_id=None)
+            # Answers belong to the active thread; fall back to session scope for
+            # sessions persisted before threads existed.
+            active_thread = (
+                session.threads.get(session.active_thread_id)
+                if session.active_thread_id else None
+            )
+            if session.active_thread_id and active_thread is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Active thread state is stale. Refresh the session before answering.",
+                )
+            thread_id = active_thread.id if active_thread else None
 
-        # Update plan state with actual questions
-        updated_plan = _plan_reducer.update_plan(
-            plan_state=session.plan_state,
-            questions=questions,
-            answers=payload.answers,
-            project_profile=session.project_profile
-        )
+            # Retrieve pending questions from storage
+            questions = _session_manager.get_pending_questions(session_id, thread_id)
+            _validate_pending_answers(questions, payload.answers)
 
-        # Update coverage with actual questions
-        updated_coverage = _plan_reducer.update_coverage(
-            coverage=session.coverage,
-            questions=questions,
-            answers=payload.answers
-        )
+            # Update plan state with actual questions (thread-aware when we have one)
+            updated_plan = _plan_reducer.update_plan(
+                plan_state=session.plan_state,
+                questions=questions,
+                answers=payload.answers,
+                thread_id=thread_id,
+                plan_notes=active_thread.notes if active_thread else None,
+                project_profile=session.project_profile
+            )
 
-        # Update session
-        session = _session_manager.update_session(
-            session_id=session_id,
-            questions=questions,
-            answers=payload.answers,
-            plan_state=updated_plan,
-            coverage=updated_coverage
-        )
+            if active_thread:
+                # Update thread coverage (with phase support), then persist the
+                # answers, the plan state and the thread coverage together.
+                updated_coverage = _plan_reducer.update_coverage(
+                    coverage=active_thread.coverage,
+                    questions=questions,
+                    answers=payload.answers,
+                    phase_coverage=active_thread.phase_coverage
+                )
+                updated_thread = _session_manager.update_thread_after_answers(
+                    session_id=session_id,
+                    thread_id=thread_id,
+                    questions=questions,
+                    answers=payload.answers,
+                    plan_state=updated_plan,
+                    coverage=updated_coverage
+                )
+                round_number = updated_thread.questions_asked // 3
+            else:
+                # Update coverage with actual questions (v0.1 session-scope flow)
+                updated_coverage = _plan_reducer.update_coverage(
+                    coverage=session.coverage,
+                    questions=questions,
+                    answers=payload.answers
+                )
 
-        # Clear pending questions since they've been answered
-        _session_manager.clear_pending_questions(session_id, thread_id=None)
+                # Update session
+                _session_manager.update_session(
+                    session_id=session_id,
+                    questions=questions,
+                    answers=payload.answers,
+                    plan_state=updated_plan,
+                    coverage=updated_coverage
+                )
+                # Estimated from the persisted history once the session is re-read
+                round_number = 0
 
-        # Generate next questions
-        round_number = len(session.qa_history) // 3  # Rough round estimation
-        next_questions = _question_engine.generate_questions(
-            idea_brief=session.idea_brief,
-            plan_state=updated_plan,
-            coverage=updated_coverage,
-            recent_qa=session.qa_history[-5:],
-            round_number=round_number,
-            project_profile=session.project_profile,
-            persona_profile=session.persona_profile
-        )
+            # Clear pending questions since they've been answered
+            _session_manager.clear_pending_questions(session_id, thread_id)
 
-        # Store the new questions for the next answer round
-        _session_manager.store_pending_questions(session_id, thread_id=None, questions=next_questions)
+            # Refresh from storage so the response reports what was actually saved
+            session = _session_manager.get_session(session_id)
+            if not active_thread:
+                round_number = len(session.qa_history) // 3
 
-        return AnswerResponse(
-            next_questions=next_questions,
-            coverage=updated_coverage,
-            plan_preview=updated_plan.model_dump()
-        )
+            # Generate next questions
+            next_questions = _question_engine.generate_questions(
+                idea_brief=session.idea_brief,
+                plan_state=updated_plan,
+                coverage=updated_coverage,
+                recent_qa=session.qa_history[-5:],
+                round_number=round_number,
+                project_profile=session.project_profile,
+                persona_profile=session.persona_profile,
+                thread_type=active_thread.type if active_thread else None,
+                plan_notes=active_thread.notes if active_thread else None,
+                phase_coverage=active_thread.phase_coverage if active_thread else None
+            )
+
+            # Store the new questions for the next answer round
+            _session_manager.store_pending_questions(session_id, thread_id, next_questions)
+
+            return AnswerResponse(
+                next_questions=next_questions,
+                # Session coverage is the aggregate across threads, which is what
+                # the UI displays as overall progress.
+                coverage=session.coverage,
+                plan_preview=updated_plan.model_dump()
+            )
 
     except HTTPException:
         raise
@@ -298,13 +367,15 @@ async def finish_session(session_id: str, request: Request, payload: FinishReque
 # ============================================================================
 
 @router.post("/session/{session_id}/threads", response_model=CreateThreadResponse)
-async def create_thread(session_id: str, request: CreateThreadRequest):
+@limiter.limit(RATE_LIMIT_LLM)
+async def create_thread(session_id: str, request: Request, payload: CreateThreadRequest):
     """
     Create a new thread in a session.
 
     Args:
         session_id: Session identifier
-        request: Thread creation request
+        request: FastAPI request object (for rate limiting)
+        payload: Thread creation request
 
     Returns:
         Created thread and initial questions
@@ -313,9 +384,9 @@ async def create_thread(session_id: str, request: CreateThreadRequest):
         # Create thread
         thread = _session_manager.create_thread(
             session_id=session_id,
-            thread_type=request.type,
-            title=request.title,
-            root_prompt=request.root_prompt
+            thread_type=payload.type,
+            title=payload.title,
+            root_prompt=payload.root_prompt
         )
 
         # Generate first questions for this thread
@@ -357,7 +428,8 @@ async def create_thread(session_id: str, request: CreateThreadRequest):
 
 
 @router.get("/session/{session_id}/threads", response_model=ListThreadsResponse)
-async def list_threads(session_id: str):
+@limiter.limit(RATE_LIMIT_READ)
+async def list_threads(session_id: str, request: Request):
     """
     List all threads in a session.
 
@@ -387,14 +459,16 @@ async def list_threads(session_id: str):
 
 
 @router.patch("/session/{session_id}/threads/{thread_id}")
-async def update_thread(session_id: str, thread_id: str, request: UpdateThreadRequest):
+@limiter.limit(RATE_LIMIT_READ)
+async def update_thread(session_id: str, thread_id: str, request: Request, payload: UpdateThreadRequest):
     """
     Update thread metadata.
 
     Args:
         session_id: Session identifier
         thread_id: Thread identifier
-        request: Update request
+        request: FastAPI request object (for rate limiting)
+        payload: Update request
 
     Returns:
         Updated thread
@@ -403,8 +477,8 @@ async def update_thread(session_id: str, thread_id: str, request: UpdateThreadRe
         thread = _session_manager.update_thread(
             session_id=session_id,
             thread_id=thread_id,
-            title=request.title,
-            active=request.active
+            title=payload.title,
+            active=payload.active
         )
 
         return thread
@@ -417,13 +491,15 @@ async def update_thread(session_id: str, thread_id: str, request: UpdateThreadRe
 
 
 @router.post("/session/{session_id}/threads/{thread_id}/activate")
-async def activate_thread(session_id: str, thread_id: str):
+@limiter.limit(RATE_LIMIT_READ)
+async def activate_thread(session_id: str, thread_id: str, request: Request):
     """
     Set a thread as the active thread.
 
     Args:
         session_id: Session identifier
         thread_id: Thread identifier
+        request: FastAPI request object (for rate limiting)
 
     Returns:
         Success message
@@ -455,90 +531,95 @@ async def submit_thread_answers(session_id: str, thread_id: str, request: Reques
         Next questions, coverage, and optional reflection prompt
     """
     try:
-        # Get session and thread
-        session = _session_manager.get_session(session_id)
-        if not session:
-            raise HTTPException(status_code=404, detail="Session not found")
+        with _session_manager.answer_round(session_id):
+            # Get session and thread
+            session = _session_manager.get_session(session_id)
+            if not session:
+                raise HTTPException(status_code=404, detail="Session not found")
 
-        thread = _session_manager.get_thread(session_id, thread_id)
-        if not thread:
-            raise HTTPException(status_code=404, detail="Thread not found")
+            thread = _session_manager.get_thread(session_id, thread_id)
+            if not thread:
+                raise HTTPException(status_code=404, detail="Thread not found")
 
-        if session.completed:
-            raise HTTPException(status_code=400, detail="Session already completed")
+            if session.completed:
+                raise HTTPException(status_code=400, detail="Session already completed")
 
-        # Retrieve pending questions for this thread
-        questions = _session_manager.get_pending_questions(session_id, thread_id)
+            # Retrieve pending questions for this thread
+            questions = _session_manager.get_pending_questions(session_id, thread_id)
+            _validate_pending_answers(questions, payload.answers)
 
-        # Update plan state (thread-aware)
-        updated_plan = _plan_reducer.update_plan(
-            plan_state=session.plan_state,
-            questions=questions,
-            answers=payload.answers,
-            # v0.2: Pass thread context and notes
-            thread_id=thread_id,
-            plan_notes=thread.notes,
-            project_profile=session.project_profile
-        )
-
-        # Update thread coverage (with phase support)
-        updated_thread_coverage = _plan_reducer.update_coverage(
-            coverage=thread.coverage,
-            questions=questions,
-            answers=payload.answers,
-            phase_coverage=thread.phase_coverage  # v0.2: Update phase coverage in-place
-        )
-
-        # Update thread with answers
-        _session_manager.update_thread_after_answers(
-            session_id=session_id,
-            thread_id=thread_id,
-            questions=questions,
-            answers=payload.answers
-        )
-
-        # Check if reflection is needed
-        reflection_prompt = None
-        thread_refreshed = _session_manager.get_thread(session_id, thread_id)  # Get updated state
-        if thread_refreshed and _reflection_service.should_inject_reflection(thread_refreshed):
-            # Generate reflection question
-            reflection_prompt = _reflection_service.generate_reflection_question(
-                thread=thread_refreshed,
-                project_context=session.idea_brief.normalized_summary
+            # Update plan state (thread-aware)
+            updated_plan = _plan_reducer.update_plan(
+                plan_state=session.plan_state,
+                questions=questions,
+                answers=payload.answers,
+                # v0.2: Pass thread context and notes
+                thread_id=thread_id,
+                plan_notes=thread.notes,
+                project_profile=session.project_profile
             )
-            logger.info(f"Injecting reflection prompt for thread {thread_id}")
 
-        # Update global coverage (aggregate across threads)
-        # TODO v0.2: Implement proper aggregation
-        updated_global_coverage = session.coverage
+            # Update thread coverage (with phase support)
+            updated_thread_coverage = _plan_reducer.update_coverage(
+                coverage=thread.coverage,
+                questions=questions,
+                answers=payload.answers,
+                phase_coverage=thread.phase_coverage  # v0.2: Update phase coverage in-place
+            )
 
-        # Generate next questions for this thread
-        round_number = thread.questions_asked // 3
-        next_questions = _question_engine.generate_questions(
-            idea_brief=session.idea_brief,
-            plan_state=updated_plan,
-            coverage=updated_thread_coverage,
-            recent_qa=thread.qa_history[-5:],
-            round_number=round_number,
-            # v0.2: Full context with profiles, thread, notes, and phases
-            project_profile=session.project_profile,
-            persona_profile=session.persona_profile,
-            thread_type=thread_refreshed.type if thread_refreshed else thread.type,
-            plan_notes=thread_refreshed.notes if thread_refreshed else thread.notes,
-            phase_coverage=thread_refreshed.phase_coverage if thread_refreshed else thread.phase_coverage
-        )
+            # Persist the answers together with the thread coverage and plan state
+            # they produced, and recompute global coverage from all threads.
+            thread = _session_manager.update_thread_after_answers(
+                session_id=session_id,
+                thread_id=thread_id,
+                questions=questions,
+                answers=payload.answers,
+                plan_state=updated_plan,
+                coverage=updated_thread_coverage
+            )
 
-        # Clear pending questions and store the new ones
-        _session_manager.clear_pending_questions(session_id, thread_id)
-        _session_manager.store_pending_questions(session_id, thread_id, next_questions)
+            # Global coverage is aggregated by the session manager; re-read the
+            # session so the response reports the persisted values.
+            session = _session_manager.get_session(session_id)
+            updated_global_coverage = session.coverage
 
-        return ThreadAnswerResponse(
-            next_questions=next_questions,
-            thread_coverage=updated_thread_coverage,
-            phase_coverage=thread.phase_coverage,
-            global_coverage=updated_global_coverage,
-            reflection_prompt=reflection_prompt
-        )
+            # Check if reflection is needed
+            reflection_prompt = None
+            if _reflection_service.should_inject_reflection(thread):
+                # Generate reflection question
+                reflection_prompt = _reflection_service.generate_reflection_question(
+                    thread=thread,
+                    project_context=session.idea_brief.normalized_summary
+                )
+                logger.info(f"Injecting reflection prompt for thread {thread_id}")
+
+            # Generate next questions for this thread, targeting what is still weak
+            round_number = thread.questions_asked // 3
+            next_questions = _question_engine.generate_questions(
+                idea_brief=session.idea_brief,
+                plan_state=updated_plan,
+                coverage=thread.coverage,
+                recent_qa=thread.qa_history[-5:],
+                round_number=round_number,
+                # v0.2: Full context with profiles, thread, notes, and phases
+                project_profile=session.project_profile,
+                persona_profile=session.persona_profile,
+                thread_type=thread.type,
+                plan_notes=thread.notes,
+                phase_coverage=thread.phase_coverage
+            )
+
+            # Clear pending questions and store the new ones
+            _session_manager.clear_pending_questions(session_id, thread_id)
+            _session_manager.store_pending_questions(session_id, thread_id, next_questions)
+
+            return ThreadAnswerResponse(
+                next_questions=next_questions,
+                thread_coverage=thread.coverage,
+                phase_coverage=thread.phase_coverage,
+                global_coverage=updated_global_coverage,
+                reflection_prompt=reflection_prompt
+            )
 
     except HTTPException:
         raise
@@ -548,14 +629,16 @@ async def submit_thread_answers(session_id: str, thread_id: str, request: Reques
 
 
 @router.post("/session/{session_id}/threads/{thread_id}/reflect", response_model=SubmitReflectionResponse)
-async def submit_reflection(session_id: str, thread_id: str, request: SubmitReflectionRequest):
+@limiter.limit(RATE_LIMIT_LLM)
+async def submit_reflection(session_id: str, thread_id: str, request: Request, payload: SubmitReflectionRequest):
     """
     Submit a reflection for a thread (v0.2).
 
     Args:
         session_id: Session identifier
         thread_id: Thread identifier
-        request: Validated reflection request with text field
+        request: FastAPI request object (for rate limiting)
+        payload: Validated reflection request with text field
 
     Returns:
         Created PlanNote
@@ -574,7 +657,7 @@ async def submit_reflection(session_id: str, thread_id: str, request: SubmitRefl
         plan_note = _reflection_service.create_plan_note(
             thread_id=thread_id,
             index_in_thread=thread.questions_asked,
-            raw_reflection=request.text.strip(),
+            raw_reflection=payload.text.strip(),
             thread_type=thread.type,
             project_profile=session.project_profile.model_dump()
         )
@@ -600,13 +683,15 @@ async def submit_reflection(session_id: str, thread_id: str, request: SubmitRefl
 
 
 @router.get("/session/{session_id}/threads/{thread_id}/insights")
-async def get_thread_insights(session_id: str, thread_id: str):
+@limiter.limit(RATE_LIMIT_READ)
+async def get_thread_insights(session_id: str, thread_id: str, request: Request):
     """
     Get insights extracted from thread reflections.
 
     Args:
         session_id: Session identifier
         thread_id: Thread identifier
+        request: FastAPI request object (for rate limiting)
 
     Returns:
         Summary of insights from reflections
@@ -635,12 +720,14 @@ async def get_thread_insights(session_id: str, thread_id: str):
 
 
 @router.get("/session/{session_id}/status")
-async def get_session_status(session_id: str):
+@limiter.limit(RATE_LIMIT_READ)
+async def get_session_status(session_id: str, request: Request):
     """
     Get session status (v0.2: includes thread information).
 
     Args:
         session_id: Session identifier
+        request: FastAPI request object (for rate limiting)
 
     Returns:
         Session metadata with thread summary
@@ -658,7 +745,8 @@ async def get_session_status(session_id: str):
                 "type": thread.type.value,
                 "questions_asked": thread.questions_asked,
                 "active": thread.active,
-                "coverage_avg": sum(thread.coverage.model_dump().values()) / 9
+                "coverage_avg": sum(thread.coverage.model_dump().values())
+                / len(thread.coverage.model_dump())
             }
             for thread in session.threads.values()
         ]
