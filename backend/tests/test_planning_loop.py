@@ -19,6 +19,8 @@ Run just this file with::
     python -m pytest backend/tests/test_planning_loop.py -v
 """
 import json
+import threading
+import time
 
 import pytest
 
@@ -182,6 +184,68 @@ class TestUIAnswerFlow:
         assert reducer_calls[1]["plan_state"]["meta"]["title"] == "Test Project"
         # Answers are attributed to the session's active thread.
         assert reducer_calls[0]["thread_id"]
+
+
+class TestAnswerRoundConcurrency:
+    """An answer round is one transaction, not several independently locked writes."""
+
+    def test_duplicate_concurrent_submission_commits_once(self, client, monkeypatch):
+        created = _create_session(client)
+        session_id = created["session_id"]
+        thread_id = created["thread_id"]
+        questions = created["first_questions"]
+        payload = _answers_for(questions)
+
+        # Widen the old race deterministically: without the route-level
+        # transaction, both requests can read the same pending set before
+        # either one persists the round.
+        from app.api import routes
+
+        original_get_pending = routes._session_manager.get_pending_questions
+
+        def slow_get_pending(current_session_id, current_thread_id=None):
+            pending = original_get_pending(current_session_id, current_thread_id)
+            time.sleep(0.05)
+            return pending
+
+        monkeypatch.setattr(
+            routes._session_manager,
+            "get_pending_questions",
+            slow_get_pending,
+        )
+
+        start = threading.Barrier(3)
+        responses = []
+        errors = []
+
+        def submit():
+            try:
+                start.wait()
+                responses.append(
+                    client.post(
+                        f"{API}/session/{session_id}/threads/{thread_id}/answer",
+                        json=payload,
+                    )
+                )
+            except Exception as exc:  # pragma: no cover - surfaced by assertion
+                errors.append(exc)
+
+        workers = [threading.Thread(target=submit) for _ in range(2)]
+        for worker in workers:
+            worker.start()
+        start.wait()
+        for worker in workers:
+            worker.join()
+
+        assert not errors, errors
+        assert sorted(response.status_code for response in responses) == [200, 409]
+
+        threads = client.get(f"{API}/session/{session_id}/threads").json()["threads"]
+        stored = next(thread for thread in threads if thread["id"] == thread_id)
+
+        # The duplicate must not count as another round or append its Q&A.
+        assert stored["questions_asked"] == len(questions)
+        assert len(stored["qa_history"]) == len(questions)
 
 
 class TestThreadStatePersistence:

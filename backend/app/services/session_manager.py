@@ -8,6 +8,7 @@ import logging
 import threading
 from datetime import datetime
 from functools import wraps
+from contextlib import contextmanager
 from typing import Optional, List, Dict
 from app.models.schema import (
     SessionData,
@@ -119,6 +120,23 @@ class SessionManager:
                 lock = threading.RLock()
                 self._session_locks[session_id] = lock
             return lock
+
+    @contextmanager
+    def answer_round(self, session_id: str):
+        """
+        Serialize a complete answer round for one session.
+
+        Answer handling is a transaction larger than any single mutator: it
+        reads the pending question set, reduces plan/coverage state, persists
+        the answers, generates the next round, and replaces pending questions.
+        Holding the same reentrant per-session lock across that whole sequence
+        prevents two requests from computing from the same stale snapshot.
+
+        This lock is process-local. Multi-worker deployments still require an
+        external/distributed session lock.
+        """
+        with self._lock_for(session_id):
+            yield
 
     def create_session(
         self,
