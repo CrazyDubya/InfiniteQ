@@ -4,6 +4,7 @@ Version 0.2: Adds support for profiles, threads, phases, and plan notes.
 """
 import logging
 import asyncio
+import uuid
 from typing import List, Dict, Any, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from app.models.schema import (
@@ -335,7 +336,14 @@ class QuestionEngine:
         parsed = []
         for q_data in questions_data:
             try:
-                question = Question(**q_data)
+                # Question IDs are protocol tokens, not authored content. Models
+                # (and the fallback path) may reuse IDs across rounds, which
+                # makes a retried stale answer indistinguishable from a current
+                # answer. Assign a fresh server-side ID every time a question is
+                # materialized so pending-set validation is reliable.
+                normalized = dict(q_data)
+                normalized["id"] = f"q_{uuid.uuid4().hex}"
+                question = Question(**normalized)
                 parsed.append(question)
             except Exception as e:
                 logger.error(f"Failed to parse question: {e}")
@@ -360,7 +368,7 @@ class QuestionEngine:
 
         return [
             Question(
-                id="FALLBACK_001",
+                id=f"q_{uuid.uuid4().hex}",
                 coverage_key=CoverageKey(lowest_key),
                 priority=0.9,
                 text=f"What's most important to clarify about the {lowest_key}?",
