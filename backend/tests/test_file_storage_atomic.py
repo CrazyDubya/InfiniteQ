@@ -107,7 +107,11 @@ class Payload:
 os.umask(int(sys.argv[2]))
 FileStorage(sys.argv[1]).save('fresh', Payload())
 """
-    subprocess.run([sys.executable, '-c', code, str(tmp_path), str(mask)], check=True)
+    # Child interpreters do not inherit pytest's pythonpath setting.
+    backend_root = str(Path(__file__).resolve().parents[1])
+    env = dict(os.environ)
+    env['PYTHONPATH'] = os.pathsep.join(filter(None, [backend_root, env.get('PYTHONPATH', '')]))
+    subprocess.run([sys.executable, '-c', code, str(tmp_path), str(mask)], check=True, env=env)
     assert (tmp_path / 'fresh.json').stat().st_mode & 0o777 == expected
 
 
