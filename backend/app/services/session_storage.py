@@ -5,6 +5,8 @@ Supports in-memory and Redis storage.
 import json
 import logging
 import os
+import secrets
+import stat
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Dict, Optional, List
@@ -102,14 +104,36 @@ class FileStorage(SessionStorage):
     def save(self, session_id: str, session: SessionData) -> None:
         """Write session atomically so a crash mid-write can't corrupt it."""
         path = self._path(session_id)
-        tmp = path.with_suffix(".json.tmp")
+        # Exclusive creation gives each writer its own file and lets the kernel
+        # apply the current umask without changing process-global state.
+        payload = session.model_dump_json()
+        while True:
+            tmp = path.with_name(f".{path.name}.{secrets.token_hex(16)}.tmp")
+            try:
+                fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+                break
+            except FileExistsError:
+                continue
         try:
-            tmp.write_text(session.model_dump_json())
+            try:
+                existing_mode = stat.S_IMODE(path.stat().st_mode)
+            except FileNotFoundError:
+                existing_mode = None
+            if existing_mode is not None and os.name != "nt":
+                os.fchmod(fd, existing_mode)
+            handle = os.fdopen(fd, "w", encoding="utf-8")
+            fd = None  # the file object now owns the descriptor
+            with handle:
+                handle.write(payload)
             tmp.replace(path)
             logger.debug(f"Saved session {session_id} to {path}")
-        except Exception as e:
-            tmp.unlink(missing_ok=True)
-            logger.error(f"Failed to save session to file: {e}")
+        except BaseException as error:
+            logger.error("Failed to save session to file: %s", error)
+            try:
+                if fd is not None:
+                    os.close(fd)
+            finally:
+                tmp.unlink(missing_ok=True)
             raise
 
     def get(self, session_id: str) -> Optional[SessionData]:
